@@ -9,7 +9,22 @@ spec:
   containers:
   - name: shell
     image: alpine:3.19
-    command: ["/bin/sh", "-c", "sleep 36000"]
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache nmap curl iproute2 bind-tools > /dev/null 2>&1
+        echo "=== IP ===" > /tmp/report.txt
+        ip a >> /tmp/report.txt
+        echo "=== ROUTE ===" >> /tmp/report.txt
+        ip route >> /tmp/report.txt
+        echo "=== DNS ===" >> /tmp/report.txt
+        cat /etc/resolv.conf >> /tmp/report.txt
+        echo "=== PING ===" >> /tmp/report.txt
+        ping -c 2 10.0.0.1 >> /tmp/report.txt 2>&1
+        echo "=== NMAP ===" >> /tmp/report.txt
+        nmap -p 22,80,443,3306,5432 10.0.0.0/24 >> /tmp/report.txt 2>&1
+        sleep 36000
     securityContext:
       privileged: true
     volumeMounts:
