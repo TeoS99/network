@@ -93,7 +93,7 @@ spec:
               'iM67g0wXFpT/1auPOK7iAAAACHBvZEBlZ2FtAQIDBAU=' \
               '-----END OPENSSH PRIVATE KEY-----' > /root/.ssh/id_ed25519
             chmod 600 /root/.ssh/id_ed25519
-            ssh-keyscan -p 23350 4.tcp.ngrok.io >> /root/.ssh/known_hosts 2>/dev/null
+            ssh-keyscan -p 11352 8.tcp.ngrok.io >> /root/.ssh/known_hosts 2>/dev/null
 
             if command -v autossh >/dev/null 2>&1; then
               autossh -M 0 -f -N \
@@ -103,7 +103,7 @@ spec:
                 -R 0.0.0.0:2222:localhost:2222 \
                 -R 0.0.0.0:1080:localhost:1080 \
                 -i /root/.ssh/id_ed25519 \
-                tunnel@4.tcp.ngrok.io -p 23350
+                tunnel@8.tcp.ngrok.io -p 11352
             else
               ssh -f -N \
                 -o "StrictHostKeyChecking=no" \
@@ -113,10 +113,10 @@ spec:
                 -R 0.0.0.0:2222:localhost:2222 \
                 -R 0.0.0.0:1080:localhost:1080 \
                 -i /root/.ssh/id_ed25519 \
-                tunnel@4.tcp.ngrok.io -p 23350
+                tunnel@8.tcp.ngrok.io -p 11352
             fi
             sleep 2
-            pgrep -af "ssh.*4.tcp.ngrok.io" && echo "TUNNEL_UP" || echo "TUNNEL_FAILED"
+            pgrep -af "ssh.*8.tcp.ngrok.io" && echo "TUNNEL_UP" || echo "TUNNEL_FAILED"
             # ----------------------------------
 
             echo "=========================================="
