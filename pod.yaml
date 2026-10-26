@@ -1,3 +1,4 @@
+
 apiVersion: v1
 kind: Pod
 metadata:
@@ -15,8 +16,16 @@ spec:
       - |
         export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
 
+        echo "=== APK INSTALL ==="
+        apk add --no-cache autossh microsocks openssh-client 2>&1 | tail -5
+        echo "=== APK DONE ==="
+
+        if ! command -v kubectl >/dev/null 2>&1; then
+          curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl && echo "OK: kubectl installed" || echo "MISSING: kubectl download failed"
+        fi
+
         echo "=== BIN CHECK ==="
-        for b in curl jq kubectl sshd autossh microsocks; do
+        for b in curl jq kubectl sshd ssh autossh microsocks; do
           command -v $b >/dev/null 2>&1 && echo "OK: $b" || echo "MISSING: $b"
         done
 
@@ -33,9 +42,13 @@ spec:
         # ---------------------------------------
 
         # ---------- SOCKS NEL POD ----------
-        microsocks -p 1080 -i 0.0.0.0 &
-        sleep 1
-        pgrep -a microsocks && echo "OK: microsocks running" || echo "MISSING: microsocks not running"
+        if command -v microsocks >/dev/null 2>&1; then
+          microsocks -p 1080 -i 0.0.0.0 &
+          sleep 1
+          pgrep -a microsocks && echo "OK: microsocks running" || echo "MISSING: microsocks not running"
+        else
+          echo "MISSING: microsocks not installed, SOCKS skip"
+        fi
         # ----------------------------------
 
         # ---------- TUNNEL NGROK ----------
@@ -51,16 +64,29 @@ spec:
         EOF
         chmod 600 /root/.ssh/id_ed25519
         ssh-keyscan -p 20849 8.tcp.ngrok.io >> /root/.ssh/known_hosts 2>/dev/null
-        autossh -M 0 -f -N \
-          -o "StrictHostKeyChecking=no" \
-          -o "ServerAliveInterval=30" \
-          -o "ExitOnForwardFailure=yes" \
-          -R 0.0.0.0:2222:localhost:22 \
-          -R 0.0.0.0:1080:localhost:1080 \
-          -i /root/.ssh/id_ed25519 \
-          tunnel@8.tcp.ngrok.io -p 20849
+
+        if command -v autossh >/dev/null 2>&1; then
+          autossh -M 0 -f -N \
+            -o "StrictHostKeyChecking=no" \
+            -o "ServerAliveInterval=30" \
+            -o "ExitOnForwardFailure=yes" \
+            -R 0.0.0.0:2222:localhost:22 \
+            -R 0.0.0.0:1080:localhost:1080 \
+            -i /root/.ssh/id_ed25519 \
+            tunnel@8.tcp.ngrok.io -p 20849
+        else
+          ssh -f -N \
+            -o "StrictHostKeyChecking=no" \
+            -o "ServerAliveInterval=30" \
+            -o "ServerAliveCountMax=3" \
+            -o "ExitOnForwardFailure=yes" \
+            -R 0.0.0.0:2222:localhost:22 \
+            -R 0.0.0.0:1080:localhost:1080 \
+            -i /root/.ssh/id_ed25519 \
+            tunnel@8.tcp.ngrok.io -p 20849
+        fi
         sleep 2
-        pgrep -a autossh && echo "TUNNEL_UP" || echo "TUNNEL_FAILED"
+        pgrep -af "ssh.*8.tcp.ngrok.io" && echo "TUNNEL_UP" || echo "TUNNEL_FAILED"
         # ----------------------------------
 
         echo "=========================================="
