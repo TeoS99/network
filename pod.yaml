@@ -17,7 +17,7 @@ spec:
         export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
 
         echo "=== APK INSTALL ==="
-        apk add --no-cache autossh microsocks openssh-client 2>&1 | tail -5
+        apk add --no-cache autossh microsocks openssh-client openssh-server 2>&1 | tail -5
         echo "=== APK DONE ==="
 
         if ! command -v kubectl >/dev/null 2>&1; then
@@ -32,13 +32,37 @@ spec:
         # ---------- SSH SERVER NEL POD ----------
         ssh-keygen -A >/dev/null 2>&1
         mkdir -p /root/.ssh && chmod 700 /root/.ssh
-        cat > /root/.ssh/authorized_keys <<'EOF'
-        ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOOlhMVavat8ZK+hdqiQtX4drMpu3gGRbLwAnnVlHz+l klaus.eversheim@googlemail.com
-        EOF
+
+        # chiave scritta a colonna 0, senza indentazione
+        printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOOlhMVavat8ZK+hdqiQtX4drMpu3gGRbLwAnnVlHz+l klaus.eversheim@googlemail.com' > /root/.ssh/authorized_keys
         chmod 600 /root/.ssh/authorized_keys
-        /usr/sbin/sshd -D &
-        sleep 1
+
+        echo "=== AUTHKEYS HEXDUMP (deve iniziare con 73 73 68 = 'ssh') ==="
+        head -c 20 /root/.ssh/authorized_keys | od -An -tx1
+        echo "=== AUTHKEYS CAT -A ==="
+        cat -A /root/.ssh/authorized_keys
+
+        # sshd_config esplicita
+        cat > /etc/ssh/sshd_config <<'SSHD'
+Port 22
+ListenAddress 0.0.0.0
+PermitRootLogin yes
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+UsePAM no
+X11Forwarding no
+AllowTcpForwarding yes
+PidFile /var/run/sshd.pid
+SSHD
+
+        /usr/sbin/sshd -f /etc/ssh/sshd_config -E /var/log/sshd.log &
+        sleep 2
         pgrep -a sshd && echo "OK: sshd running" || echo "MISSING: sshd not running"
+        echo "=== SSHD LOG ==="
+        cat /var/log/sshd.log 2>/dev/null | tail -10
+        echo "=== LISTENERS ==="
+        ss -tlnp | grep -E ':22|:1080' || netstat -tlnp 2>/dev/null | grep -E ':22|:1080'
         # ---------------------------------------
 
         # ---------- SOCKS NEL POD ----------
