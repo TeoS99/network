@@ -45,6 +45,10 @@ spec:
 
             apk add --no-cache curl jq aws-cli 2>&1 | tail -3
 
+            if ! command -v kubectl >/dev/null 2>&1; then
+              curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
+            fi
+
             echo "############ [1] NODES & CONFIG ############"
             kubectl get nodes -o wide
             kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
