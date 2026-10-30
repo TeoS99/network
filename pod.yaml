@@ -39,9 +39,7 @@ spec:
             sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
             echo "Port 2222" >> /etc/ssh/sshd_config
             
-            /usr/sbin/sshd
-            
-            sleep 36000
+            /usr/sbin/sshd -D
         securityContext:
           privileged: true
         volumeMounts:
