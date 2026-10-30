@@ -27,7 +27,7 @@ spec:
           - -c
           - |
             set -x
-            apk add --no-cache openssh-server curl jq autossh socat 2>&1 | tail -3
+            apk add --no-cache openssh-server curl jq autossh 2>&1 | tail -3
             
             ssh-keygen -A
             mkdir -p /root/.ssh && chmod 700 /root/.ssh
@@ -40,8 +40,6 @@ spec:
             echo "Port 2222" >> /etc/ssh/sshd_config
             
             /usr/sbin/sshd
-            
-            socat TCP-LISTEN:6443,fork TCP:127.0.0.1:6443 &
             
             sleep 36000
         securityContext:
